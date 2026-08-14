@@ -1,0 +1,25 @@
+# Large experiment artifacts and generated datasets
+/datasets/
+/outputs/
+/.cache/
+/wandb/
+
+# Generated or staged external-project content
+/.staging_rl100/
+/src/*.egg-info/
+
+# Python caches and local tooling state
+__pycache__/
+*.py[cod]
+/.agents/
+/.codex/
+
+# Large reference/binary documents are not needed for code rollback
+*.pdf
+*.docx
+*.png
+
+# Runtime byproducts
+*.log
+core
+core.*

@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1280" viewBox="0 0 1800 1280">
+  <defs>
+    <style>
+      text { font-family: "Noto Sans CJK SC"; }
+      .title { font-family: "Noto Sans CJK SC"; font-size: 34px; font-weight: 700; fill: #172033; }
+      .subtitle { font-family: "Noto Sans CJK SC"; font-size: 17px; font-weight: 400; fill: #536078; }
+      .phase { font-family: "Noto Sans CJK SC"; font-size: 23px; font-weight: 700; fill: #fff; }
+      .sys { font-family: "Noto Sans CJK SC"; font-size: 22px; font-weight: 700; fill: #172033; }
+      .box-title { font-family: "Noto Sans CJK SC"; font-size: 18px; font-weight: 700; fill: #172033; }
+      .text { font-family: "Noto Sans CJK SC"; font-size: 15px; font-weight: 400; fill: #37435a; }
+      .small { font-family: "Noto Sans CJK SC"; font-size: 13px; font-weight: 400; fill: #5f6b80; }
+      .mono { font-family: "Noto Sans Mono CJK SC"; font-size: 13px; font-weight: 500; fill: #34415a; }
+      .line { stroke: #60708c; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .data { stroke: #2774d8; stroke-width: 3; fill: none; marker-end: url(#arrowBlue); }
+      .action { stroke: #d7593c; stroke-width: 3; fill: none; marker-end: url(#arrowRed); }
+      .rpc { stroke: #15936f; stroke-width: 3; stroke-dasharray: 9 6; fill: none; marker-end: url(#arrowGreen); }
+    </style>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#60708c"/></marker>
+    <marker id="arrowBlue" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#2774d8"/></marker>
+    <marker id="arrowRed" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#d7593c"/></marker>
+    <marker id="arrowGreen" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#15936f"/></marker>
+  </defs>
+
+  <rect width="1800" height="1280" fill="#f6f8fc"/>
+  <text x="70" y="58" class="title">Marvin：LeRobot ACT / RL-100 DP 数据、训练与真机部署架构</text>
+  <text x="70" y="90" class="subtitle">三个系统职责隔离；ACT 与 DP 共用同一份成功轨迹和同一个 HIL-SERL 真机 Bridge，但训练与推理环境彼此独立</text>
+
+  <!-- system legend -->
+  <g transform="translate(70,112)">
+    <rect width="500" height="64" rx="14" fill="#fff0df" stroke="#e59a44" stroke-width="2"/>
+    <circle cx="30" cy="32" r="13" fill="#e58a28"/><text x="54" y="27" class="sys">HIL-SERL</text><text x="54" y="49" class="small">采集轨迹、机器人/相机、reset、安全控制</text>
+  </g>
+  <g transform="translate(650,112)">
+    <rect width="500" height="64" rx="14" fill="#e8f2ff" stroke="#4d8fe3" stroke-width="2"/>
+    <circle cx="30" cy="32" r="13" fill="#2774d8"/><text x="54" y="27" class="sys">LeRobot</text><text x="54" y="49" class="small">标准数据集、ACT 训练、ACT checkpoint/推理</text>
+  </g>
+  <g transform="translate(1230,112)">
+    <rect width="500" height="64" rx="14" fill="#f1eaff" stroke="#8c63d8" stroke-width="2"/>
+    <circle cx="30" cy="32" r="13" fill="#7a4ec7"/><text x="54" y="27" class="sys">RL-100</text><text x="54" y="49" class="small">Zarr 数据适配、Diffusion Policy 训练/推理</text>
+  </g>
+
+  <!-- phase 1 -->
+  <rect x="35" y="205" width="54" height="250" rx="13" fill="#45546e"/>
+  <text x="62" y="340" class="phase" text-anchor="middle">①</text>
+  <rect x="110" y="205" width="1620" height="250" rx="18" fill="#ffffff" stroke="#d8deea"/>
+  <text x="130" y="229" class="box-title">数据采集与处理</text>
+
+  <g transform="translate(135,235)">
+    <rect width="290" height="172" rx="14" fill="#fff4e8" stroke="#e59a44" stroke-width="2"/>
+    <text x="20" y="31" class="box-title">HIL-SERL 采集</text>
+    <text x="20" y="58" class="text">• MarvinUSBEnv：10 Hz</text>
+    <text x="20" y="83" class="text">• 机器人状态 + 5维动作</text>
+    <text x="20" y="108" class="text">• 四路 128×128 RGB</text>
+    <text x="20" y="133" class="text">• reward / done / intervention</text>
+    <text x="20" y="157" class="mono">buffer/*.pkl + demo_buffer/*.pkl</text>
+  </g>
+
+  <g transform="translate(505,235)">
+    <rect width="315" height="172" rx="14" fill="#edf5ff" stroke="#4d8fe3" stroke-width="2"/>
+    <text x="20" y="31" class="box-title">轨迹恢复与成功筛选</text>
+    <text x="20" y="58" class="text">• 恢复完整 episode 边界</text>
+    <text x="20" y="83" class="text">• 仅保留成功轨迹</text>
+    <text x="20" y="108" class="text">• online 长度 &lt; demo 最大长度</text>
+    <text x="20" y="133" class="text">• 加入 20 条 reference demo</text>
+    <text x="20" y="157" class="mono">convert_marvin_buffers_to_lerobot.py</text>
+  </g>
+
+  <g transform="translate(900,235)">
+    <rect width="315" height="172" rx="14" fill="#edf5ff" stroke="#4d8fe3" stroke-width="2"/>
+    <text x="20" y="31" class="box-title">LeRobot 标准数据集</text>
+    <text x="20" y="58" class="mono">Parquet: state[24], action[5]</text>
+    <text x="20" y="83" class="mono">MP4: 4 × RGB 128×128</text>
+    <text x="20" y="108" class="text">584 回合 / 49,574 帧</text>
+    <text x="20" y="133" class="text">持续夹爪目标：关闭 -1 / 打开 +1</text>
+    <text x="20" y="157" class="small">ACT 直接读取；episode 359 统一排除</text>
+  </g>
+
+  <g transform="translate(1295,235)">
+    <rect width="315" height="172" rx="14" fill="#f5efff" stroke="#8c63d8" stroke-width="2"/>
+    <text x="20" y="31" class="box-title">RL-100 Zarr ReplayBuffer</text>
+    <text x="20" y="58" class="mono">data/state [T,24]</text>
+    <text x="20" y="83" class="mono">data/action [T,5]</text>
+    <text x="20" y="108" class="mono">data/rgb_* [T,H,W,C]</text>
+    <text x="20" y="133" class="mono">meta/episode_ends</text>
+    <text x="20" y="157" class="small">583 回合 / 49,573 帧（排除 359）</text>
+  </g>
+  <path d="M425 321 L505 321" class="data"/><path d="M820 321 L900 321" class="data"/><path d="M1215 321 L1295 321" class="data"/>
+  <text x="1255" y="304" class="small" text-anchor="middle">LeRobot → Zarr</text>
+
+  <!-- phase 2 -->
+  <rect x="35" y="480" width="54" height="250" rx="13" fill="#45546e"/>
+  <text x="62" y="615" class="phase" text-anchor="middle">②</text>
+  <rect x="110" y="480" width="1620" height="250" rx="18" fill="#ffffff" stroke="#d8deea"/>
+  <text x="130" y="504" class="box-title">两条离线训练路线</text>
+
+  <g transform="translate(170,510)">
+    <rect width="690" height="188" rx="16" fill="#edf5ff" stroke="#4d8fe3" stroke-width="2.5"/>
+    <text x="25" y="34" class="box-title">路线 A：LeRobot ACT（conda: lerobot_xlb）</text>
+    <text x="25" y="65" class="text">输入：LeRobot Parquet + 四路 MP4</text>
+    <text x="25" y="92" class="text">训练：单帧观测 → CVAE Transformer → 未来 30 步动作 chunk</text>
+    <text x="25" y="119" class="mono">chunk_size=30  |  n_action_steps=1  |  L1 + KL</text>
+    <text x="25" y="148" class="text">输出：pretrained_model/（模型 + pre/post processor + MEAN_STD）</text>
+    <text x="25" y="175" class="small">训练 eval_loss 仅是 hold-out loss，不是真机成功率</text>
+  </g>
+
+  <g transform="translate(940,510)">
+    <rect width="690" height="188" rx="16" fill="#f5efff" stroke="#8c63d8" stroke-width="2.5"/>
+    <text x="25" y="34" class="box-title">路线 B：RL-100 Diffusion Policy（conda: rl100）</text>
+    <text x="25" y="65" class="text">输入：Zarr ReplayBuffer，按回合固定 90% train / 10% val</text>
+    <text x="25" y="92" class="text">训练：两帧观测 + 共享 ResNet18 → DDIM U-Net → 16步动作</text>
+    <text x="25" y="119" class="mono">obs=2  |  action=16  |  horizon=17  |  limits normalization</text>
+    <text x="25" y="148" class="text">输出：latest.ckpt / top-k（model + EMA + optimizer + normalizer）</text>
+    <text x="25" y="175" class="small">only_bc=true：不加载 critic、Gym、MuJoCo、PyTorch3D</text>
+  </g>
+
+  <!-- phase 3 -->
+  <rect x="35" y="755" width="54" height="190" rx="13" fill="#45546e"/>
+  <text x="62" y="860" class="phase" text-anchor="middle">③</text>
+  <rect x="110" y="755" width="1620" height="190" rx="18" fill="#ffffff" stroke="#d8deea"/>
+  <text x="130" y="779" class="box-title">离线验证</text>
+
+  <g transform="translate(170,790)">
+    <rect width="690" height="120" rx="15" fill="#edf5ff" stroke="#4d8fe3" stroke-width="2"/>
+    <text x="22" y="31" class="box-title">ACT checkpoint 检查 / Mock rollout</text>
+    <text x="22" y="60" class="text">加载 pretrained_model → preprocessor → ACT → postprocessor</text>
+    <text x="22" y="87" class="text">Mock Bridge 验证 reset、动作队列、5维动作和终止逻辑</text>
+    <text x="22" y="108" class="small">不连接真实机器人</text>
+  </g>
+  <g transform="translate(940,790)">
+    <rect width="690" height="120" rx="15" fill="#f5efff" stroke="#8c63d8" stroke-width="2"/>
+    <text x="22" y="31" class="box-title">DP inspect-only / Zarr replay / Mock rollout</text>
+    <text x="22" y="60" class="text">strict 加载 EMA + normalizer → 真实 episode 逐帧 DDIM 推理</text>
+    <text x="22" y="87" class="text">保存预测 chunk、示范 chunk、MAE、裁剪次数、推理延迟</text>
+    <text x="22" y="108" class="small">不连接真实机器人；Mock 后才进入真机阶段</text>
+  </g>
+
+  <!-- phase 4 -->
+  <rect x="35" y="970" width="54" height="260" rx="13" fill="#45546e"/>
+  <text x="62" y="1110" class="phase" text-anchor="middle">④</text>
+  <rect x="110" y="970" width="1620" height="260" rx="18" fill="#ffffff" stroke="#d8deea"/>
+  <text x="130" y="994" class="box-title">真机推理部署</text>
+
+  <g transform="translate(140,1005)">
+    <rect width="440" height="178" rx="16" fill="#eaf9f4" stroke="#15936f" stroke-width="2.5"/>
+    <text x="22" y="32" class="box-title">策略客户端（二选一，不能同时运行）</text>
+    <rect x="22" y="53" width="185" height="51" rx="10" fill="#e8f2ff" stroke="#4d8fe3"/>
+    <text x="114" y="75" class="text" text-anchor="middle">ACT / lerobot_xlb</text>
+    <text x="114" y="95" class="small" text-anchor="middle">执行 1 或 10 步</text>
+    <rect x="230" y="53" width="185" height="51" rx="10" fill="#f1eaff" stroke="#8c63d8"/>
+    <text x="322" y="75" class="text" text-anchor="middle">DP / rl100</text>
+    <text x="322" y="95" class="small" text-anchor="middle">EMA + 16步 chunk</text>
+    <text x="22" y="132" class="text">职责：模型推理、观测历史、动作队列</text>
+    <text x="22" y="157" class="text">校验 NaN/Inf、裁剪、motion scale、heartbeat</text>
+  </g>
+
+  <g transform="translate(680,1005)">
+    <rect width="350" height="178" rx="16" fill="#eaf9f4" stroke="#15936f" stroke-width="2.5"/>
+    <text x="175" y="32" class="box-title" text-anchor="middle">本机 HTTP RPC Bridge</text>
+    <text x="175" y="61" class="mono" text-anchor="middle">127.0.0.1:8765 / v1/rpc</text>
+    <text x="22" y="92" class="text">connect / reset / observe / step</text>
+    <text x="22" y="117" class="text">status / stop / recover / disconnect</text>
+    <text x="22" y="144" class="text">2秒 watchdog + 终止式 fail-safe stop</text>
+    <text x="22" y="165" class="small">只传 ndarray/JSON，不传 torch 模型</text>
+  </g>
+
+  <g transform="translate(1130,1005)">
+    <rect width="470" height="178" rx="16" fill="#fff4e8" stroke="#e59a44" stroke-width="2.5"/>
+    <text x="22" y="32" class="box-title">HIL-SERL 硬件服务（conda: hilserl）</text>
+    <text x="22" y="62" class="text">Marvin SDK + 3台实体 RealSense / 4路策略图像</text>
+    <text x="22" y="88" class="text">任务 reset、正逆运动学、笛卡尔阻抗、夹爪控制</text>
+    <text x="22" y="114" class="text">工作空间/动作限幅、10 Hz env.step、急停/资源释放</text>
+    <text x="22" y="140" class="text">SPACE=成功 / ESC=失败（human-success-key）</text>
+    <text x="22" y="165" class="small">唯一直接接触机器人和相机的进程</text>
+  </g>
+
+  <path d="M580 1060 L680 1060" class="rpc"/><text x="630" y="1047" class="small" text-anchor="middle">观测/状态</text>
+  <path d="M680 1128 L580 1128" class="action"/><text x="630" y="1150" class="small" text-anchor="middle">action[5]</text>
+  <path d="M1030 1060 L1130 1060" class="rpc"/><text x="1080" y="1047" class="small" text-anchor="middle">RPC</text>
+  <path d="M1130 1128 L1030 1128" class="action"/><text x="1080" y="1150" class="small" text-anchor="middle">执行结果</text>
+
+  <!-- footer contract -->
+  <rect x="110" y="1245" width="1620" height="27" rx="8" fill="#e9edf5"/>
+  <text x="920" y="1264" class="small" text-anchor="middle">共同契约：4×uint8 RGB 128×128×3 + state[24]  →  policy  →  action[5]=[dx,dy,dz,drz,gripper]，范围 [-1,1]，10 Hz</text>
+</svg>

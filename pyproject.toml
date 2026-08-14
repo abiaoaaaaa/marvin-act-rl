@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_marvin"
+version = "0.1.0"
+description = "Marvin deployment bridge and decoupled ACT offline-to-online RL toolkit"
+requires-python = ">=3.8"
+dependencies = ["numpy>=1.23.5"]
+
+[project.scripts]
+marvin-bridge = "lerobot_robot_marvin.bridge_server:main"
+marvin-act-rollout = "lerobot_robot_marvin.act_rollout:main"
+marvin-rl100-rollout = "lerobot_robot_marvin.rl100_rollout:main"
+marvin-rl100-replay = "lerobot_robot_marvin.rl100_replay:main"
+act-rl-build-replay = "act_rl.scripts.build_replay:main"
+act-rl-collect = "act_rl.scripts.collect_online:main"
+act-rl-train-offline = "act_rl.scripts.train_offline:main"
+act-rl-train-online = "act_rl.scripts.train_online:main"
+act-rl-inspect = "act_rl.scripts.inspect_checkpoint:main"
+act-rl-evaluate-offline = "act_rl.scripts.evaluate_offline:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
