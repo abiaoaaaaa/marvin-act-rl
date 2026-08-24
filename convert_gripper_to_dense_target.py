@@ -259,7 +259,11 @@ def main() -> None:
     output_root.mkdir(parents=True)
     try:
         copy_tree(source_root / "meta", output_root / "meta", mode="copy")
-        copy_tree(source_root / "videos", output_root / "videos", mode=args.video_mode)
+        # v3 datasets may store camera frames as videos or inline/image files.
+        # The latter is used by the human40 dataset to avoid video decoding ABI
+        # issues in the residual environment.
+        media_dir_name = "videos" if (source_root / "videos").is_dir() else "images"
+        copy_tree(source_root / media_dir_name, output_root / media_dir_name, mode=args.video_mode)
 
         totals = {
             "episodes": 0,
@@ -288,7 +292,8 @@ def main() -> None:
                 "command_threshold": args.command_threshold,
                 "pose_open_threshold": args.pose_open_threshold,
             },
-            "video_mode": args.video_mode,
+            "media_dir": media_dir_name,
+            "video_mode": args.video_mode if media_dir_name == "videos" else None,
             **{
                 key: dict(value) if isinstance(value, Counter) else value
                 for key, value in totals.items()

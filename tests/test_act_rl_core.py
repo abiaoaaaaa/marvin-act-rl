@@ -6,10 +6,11 @@ import torch
 from torch import nn
 
 from act_rl.algorithms.iql import IQLACTLearner, expectile_loss
-from act_rl.config import ACTRLConfig, IQLConfig, NetworkConfig
+from act_rl.config import ACTRLConfig, IQLConfig, NetworkConfig, OnlineConfig
 from act_rl.datasets.lerobot_chunk import LeRobotChunkDataset
 from act_rl.replay import MixedReplay, ReplayBuffer
 from act_rl.types import ChunkBatch, ChunkTransition
+from act_rl.scripts.train_online import resolve_offline_fraction
 
 
 class FakeActor(nn.Module):
@@ -48,6 +49,13 @@ class ACTRLCoreTest(unittest.TestCase):
     def test_expectile_is_asymmetric(self):
         value = expectile_loss(torch.tensor([-1.0, 1.0]), 0.7)
         self.assertAlmostEqual(value.item(), 0.5, places=5)
+
+    def test_stage1_offline_fraction_schedule(self):
+        cfg = ACTRLConfig(online=OnlineConfig())
+        self.assertEqual(resolve_offline_fraction(cfg, 999), 0.75)
+        self.assertEqual(resolve_offline_fraction(cfg, 1000), 0.50)
+        self.assertEqual(resolve_offline_fraction(cfg, 4999), 0.50)
+        self.assertEqual(resolve_offline_fraction(cfg, 5000), 0.25)
 
     def test_iql_update(self):
         cfg = ACTRLConfig(

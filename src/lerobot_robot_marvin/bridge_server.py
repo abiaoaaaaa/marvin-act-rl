@@ -238,7 +238,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--human-success-key",
         action="store_true",
-        help="Without learned reward, use SPACE=success and ESC=failure on the bridge host",
+        help=(
+            "Without learned reward, enable the human outcome input selected "
+            "by --human-outcome-input"
+        ),
+    )
+    parser.add_argument(
+        "--human-outcome-input",
+        choices=("keyboard", "footswitch"),
+        default="keyboard",
+        help="keyboard: SPACE/ESC; footswitch: SHIFT+LEFT/SHIFT+RIGHT",
     )
     parser.add_argument("--allow-hardware", action="store_true")
     parser.add_argument("--confirm-hardware-risk", default="")
@@ -261,6 +270,7 @@ def make_backend(args: argparse.Namespace) -> Backend:
     return HilserlBackend(
         classifier=args.classifier,
         human_success_key=args.human_success_key,
+        human_outcome_input=args.human_outcome_input,
     )
 
 

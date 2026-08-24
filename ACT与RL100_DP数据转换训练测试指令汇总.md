@@ -196,6 +196,170 @@ other          0 帧
   dense_gripper_conversion_report.json
 ```
 
+### 3.4 转换为Residual固定LeRobot v2.1数据集
+
+`residual-offpolicy-rl`固定的LeRobot使用v2.1逐episode布局，不能直接读取当前v3数据集。
+转换器必须用`residual`环境执行。默认`--media-storage image`把四相机图像嵌入逐episode
+Parquet，绕过当前`residual`环境中TorchCodec与TorchVision VideoReader不兼容的问题；代价是
+输出占用空间高于视频格式。输出目录已存在时默认拒绝覆盖，只有明确加入`--overwrite`才删除重建。
+
+BC成功数据转换：
+
+```bash
+/home/xlb/miniconda3/envs/residual/bin/python /home/xlb/code/强化微调ACT/convert_marvin_v3_to_residual_v21.py --input-root /home/xlb/code/强化微调ACT/datasets/marvin_usb_act_success_dense_gripper --output-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_bc --repo-id marvin_usb_bc --mode bc --media-storage image --exclude-episodes 359
+```
+
+Residual RL成功/失败数据转换；输出额外保留`rl.reward`、`rl.terminated`、`rl.success`、
+`rl.intervention`、`rl.safety_abort`，并根据episode边界生成训练代码需要的`next.done`：
+
+```bash
+/home/xlb/miniconda3/envs/residual/bin/python /home/xlb/code/强化微调ACT/convert_marvin_v3_to_residual_v21.py --input-root /home/xlb/code/强化微调ACT/datasets/marvin_usb_act_rl_offline --output-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --repo-id marvin_usb_rl --mode rl --media-storage image --exclude-episodes 556
+```
+
+先做两回合smoke时，在命令末尾加入`--max-episodes 2`并使用独立输出目录。每次转换完成后检查
+输出根目录的`residual_v21_conversion_report.json`；排除异常episode 359后BC应为583回合、
+49,573帧，排除异常episode 556后RL应为807回合、90,118帧。
+
+### 3.5 Residual路线1：在LeRobot 0.1.0中重训ACT
+
+转换报告、回合数、帧数和图像轴名全部通过后，使用Residual自带的LeRobot训练新ACT。
+BC训练使用`marvin_usb_bc`，Residual learner的归一化统计使用`marvin_usb_rl`，两者不要交换。
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 HF_LEROBOT_HOME=/home/xlb/code/强化微调ACT/datasets/residual_v21 HF_DATASETS_CACHE=/home/xlb/code/强化微调ACT/.cache/huggingface_datasets_residual HUGGINGFACE_HUB_CACHE=/home/xlb/code/强化微调ACT/.cache/huggingface_hub_residual PYTHONPATH=/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.lerobot.scripts.train_bc_dexmg --dataset marvin_usb_bc --policy act --steps 100000 --batch_size 8 --num_workers 4 --seed 1000 --device cuda --output_dir /home/xlb/code/强化微调ACT/outputs/residual_route1_act --log_freq 100 --save_freq 5000 --eval_fraction 0.1 --eval_freq 2000 --eval_batches 0 --split_seed 1000 --policy_cameras side_policy wrist_1buchong wrist_1 wrist_2
+```
+
+使用`split_seed=1000`时，583回合按episode固定分为525个训练回合/44,994帧与58个
+验证回合/4,579帧。验证集关闭随机图像增强，每2,000个optimizer step对完整验证集计算
+`eval_loss`。ACT的state/action/image归一化统计仅由525个训练回合聚合，验证回合不参与
+统计量拟合。划分固定写入`dataset_split.json`，最低验证损失的模型写入`best_eval/policy`。
+
+本地checkpoint保留在`/home/xlb/code/强化微调ACT/outputs/residual_route1_act`；Residual使用
+`/home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy`。该目录必须同时包含
+`config.json`和权重文件。不开启WandB也会保留本地checkpoint。
+
+Residual原始坐标契约为：
+
+```text
+RL state       (raw_state - dataset_mean) / max(dataset_std, min_state_std)
+RL base action ActionScaler.scale(raw_ACT_action)
+RL action      ActionScaler.scale(raw_executed_action)
+robot command  ActionScaler.unscale(normalized_base_action + normalized_residual)
+```
+
+`agent.actor.action_scale=0.1`控制学习的residual幅度。`marvin.residual_scale=null`为原始
+ResFiT路径；若真机初次验证显式设为`0.05`，该0.05也是归一化residual单位，
+不是机器人原始命令单位。
+
+#### 路线1 LeRobot 0.1.0 ACT真机5步测试
+
+下面两条命令会实际初始化/reset机器人并下发动作；ACT客户端第5步结束时环境还会执行一次
+自动reset。确保急停可用、工作空间无人员和障碍物，并且没有其他ACT、DP或RL客户端连接。
+
+终端一启动hardware Bridge：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code_marvin/hil-serl:/home/xlb/code_marvin/hil-serl/examples:/home/xlb/code_marvin/hil-serl/serl_robot_infra:/home/xlb/code_marvin/hil-serl/serl_launcher /home/xlb/miniconda3/envs/hilserl/bin/python -m lerobot_robot_marvin.bridge_server --backend hardware --host 127.0.0.1 --port 8765 --human-success-key --human-outcome-input footswitch --allow-hardware --confirm-hardware-risk=I_UNDERSTAND_THIS_CONTROLS_A_REAL_ROBOT --log-level INFO
+```
+
+Bridge完成机器人和四相机初始化后，终端二加载验证集最优ACT并执行零residual的1回合5步测试。
+运行时固定预测20个动作、只执行前5个后重新观测和推理：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/marvin_route1_act_chunk20_exec5_real_smoke --device cuda --host 127.0.0.1 --port 8765 --episodes 1 --max-steps 5 --residual-scale 0.0 --actor-action-scale 0.1 --min-action-range 0.1 --min-state-std 0.1 --allow-real-robot
+```
+
+不传`--residual-checkpoint`且设置`--residual-scale 0.0`，所以该命令只测试ACT base policy，
+不会执行学习得到的residual。Bridge终端可随时按`ESC`标记失败并结束回合，紧急情况优先使用
+机器人急停；测试结束后按`Ctrl+C`终止Bridge并确认机器人及相机释放。
+
+上述`marvin_route1_act_chunk20_exec5_real_smoke`仅用于ACT验收，不得复制到正式RL replay目录。
+
+#### Residual路线1：正式真机TD3训练
+
+正式输出统一使用`/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5`：`replay`保存原子写入的
+在线回合，`checkpoints`保存完整agent/optimizer断点，`deployment/residual_actor_latest.pt`保存可部署
+actor，`cache`保存离线buffer缓存。正式manifest为`schema_version=5`，并固定记录
+`base_policy_chunk_size=20`和`base_policy_n_action_steps=5`、
+`coordinate_frame=resfit_marvin_bounded_v2`和
+`action_contract=marvin_normalized_command_box_v1`；ACT权重、离线数据统计和归一化参数任一不一致都会
+拒绝混用。所有ACT原始命令和base+residual合成命令最终都硬裁剪到Bridge要求的`[-1,1]`。
+
+保持上面的hardware Bridge运行，在终端二用零residual采集正式启动回放。`--min-transitions 1000`
+指经过`n_step=3`转换后仍可用于学习的transition数，不是NPZ原始行数；命令会按完整回合持续采集，
+`--resume`会校验已有回放身份后从下一个episode编号安全追加；`--episodes 1`只要求本次至少新增
+一个回合，真正的停止条件仍是1,000条可用样本。6个完整200步回合理论上得到
+`6*(200-3+1)=1,188`条可用样本；若回合提前终止，collector会继续补到1,000条：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/replay --device cuda --host 127.0.0.1 --port 8765 --episodes 1 --max-steps 200 --min-transitions 1000 --n-step 3 --resume --residual-scale 0.0 --actor-action-scale 0.1 --min-action-range 0.1 --min-state-std 0.1 --allow-real-robot
+```
+
+采集结束后必须先做只读审计，看到`ready: true`且`usable_nstep_transitions >= 1000`才可启动learner：
+
+```bash
+PYTHONPATH=/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.audit_marvin_replay --replay-dir /home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/replay --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --actor-action-scale 0.1 --min-action-range 0.1 --min-state-std 0.1 --n-step 3 --minimum-transitions 1000
+```
+
+Residual现直接复用vendored LeRobot的gRPC transport实现HIL-SERL/RLPD式长驻
+actor/learner：actor异步发送完整episode transition，learner增量加入online replay并持续训练；
+learner每50步推送actor+encoder参数，actor只在episode边界原子应用最新参数。NPZ仍先落盘，
+作为gRPC断线时的可审计备份。learner限制为80% CUDA显存，actor限制为18%；这不是精确算力
+配额，因此learner每个UTD=4更新组后主动让行10ms。online/offline batch保持50:50。critic
+warm-up只在首次执行1,000步，完成立即保存；完整断点每1,000步保存并永久保留，
+不再自动删除旧的编号checkpoint。
+
+正式learner默认使用W&B online模式，远程project为`marvin-residual-td3-route1`，固定run ID为
+`marvinresidualc20e5s1000`。因此`latest.pt`断点续训会继续写入同一个远程run。首次运行前先登录：
+
+```bash
+/home/xlb/miniconda3/envs/residual/bin/python -m wandb login
+```
+
+每100 learner step远程记录critic/actor loss、Q值、梯度、学习率、Residual L1/L2及饱和率、
+online/offline buffer大小、累计在线回合/transition/成功率和训练吞吐；critic warm-up每100次更新
+也会记录。在线模式仍在本机`/home/xlb/code/强化微调ACT/wandb`保留运行文件，短暂断网由W&B
+后台重试，但启动actor前必须确认learner已完成W&B初始化并监听`127.0.0.1:50051`。
+
+第一轮learner命令如下；此时不需要启动Bridge：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 CACHE_DIR=/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/cache MPLCONFIGDIR=/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/matplotlib PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.train_residual_td3 --config-path /home/xlb/code/residual-offpolicy-rl/resfit/rl_finetuning/config --config-name marvin_residual
+```
+
+程序中断后重新执行同一条learner命令；`resume_checkpoint=auto`会自动用完整
+`latest.pt`续训，不会把部署actor误当作训练断点。
+
+看到`Marvin learner gRPC listening on 127.0.0.1:50051`后，保持learner运行，
+按上文命令启动hardware Bridge，再在终端二启动长驻actor：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/replay --device cuda --host 127.0.0.1 --port 8765 --max-steps 200 --min-transitions 0 --n-step 3 --resume --residual-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/deployment/residual_actor_latest.pt --actor-action-scale 0.1 --min-action-range 0.1 --min-state-std 0.1 --async-grpc --learner-host 127.0.0.1 --learner-port 50051 --gpu-memory-fraction 0.18 --continuous --allow-real-robot
+```
+
+actor和learner启动后均长期运行，不再按5回合/500步手工切换。actor只在episode边界应用
+gRPC收到的最新参数。真机仍要求急停可用，SPACE/ESC结果键由操作者监控。
+`marvin.residual_scale=null`遵循原始ResFiT路径；首次并发真机短测建议在actor命令末尾增加
+`--residual-scale 0.05`，并监控单步控制时间是否继续约100ms。
+
+若需要对比最新step 11050之前的倒数第二个actor，使用从完整step 11000断点导出的
+`/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/deployment/residual_actor_step_00011000.pt`；评估回放必须写入独立目录：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/residual_route1_act/best_eval/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/eval_act_residual_step11000_chunk20_exec5 --device cuda --host 127.0.0.1 --port 8765 --episodes 20 --max-steps 200 --min-transitions 0 --n-step 3 --resume --residual-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5/deployment/residual_actor_step_00011000.pt --residual-scale 0.1 --actor-action-scale 0.1 --min-action-range 0.1 --min-state-std 0.1 --gpu-memory-fraction 0.18 --allow-real-robot
+```
+
+Residual collector连接Bridge后会启动独立0.5秒heartbeat。成功的`reset/step`响应会刷新主控联系；
+ACT推理或Replay压缩写盘超过2秒时，heartbeat会发送`status`维持watchdog，连续3次失败才向主循环
+报错。learner-only不创建heartbeat，也不访问Bridge。终止transition已经在环境内部完成下一回合reset，collector会复用该观测，
+不会再额外执行第二次reset。更新心跳代码后必须重启Bridge和collector/learner进程；已经原子保存的
+schema 5回合可直接通过`--resume`继续。旧`20/20`的schema 4回放保留在旧目录，
+不得与新`20/5`回放混用。
+
+不得用LeRobot 0.6.2的`ACTPolicyRunner`加载这个checkpoint；Marvin Residual现在直接用
+Residual仓库内的LeRobot 0.1.0 `ACTPolicy.from_pretrained()`。离线replay生成时，ACT action
+queue必须在每个episode边界reset。
+
 ## 4. ACT 训练
 
 ### 4.1 推荐：持续目标夹爪，从头训练
@@ -500,8 +664,8 @@ TORCH_HOME="$PWD/.cache/torch" \
 PYTHONPATH="$PWD/src:/home/xlb/code/lerobot/src" \
 /home/xlb/miniconda3/envs/lerobot_xlb/bin/python \
   -m act_rl.scripts.collect_online \
-  --checkpoint outputs/act_rl_offline_iql/checkpoints/step_00010000/pretrained_model \
-  --output-dir outputs/act_rl_online_replay \
+  --checkpoint outputs/act_rl_offline_iql/checkpoints/step_00050000/pretrained_model \
+  --output-dir outputs/act_rl_online_round_001_mock_replay \
   --host 127.0.0.1 \
   --port 8765 \
   --device cuda \
@@ -510,11 +674,39 @@ PYTHONPATH="$PWD/src:/home/xlb/code/lerobot/src" \
   --executed-steps 10
 ```
 
-在线Replay按“一回合一个NPZ”追加写入，已有episode不会被覆盖。
+在线Replay v2按“一回合一个NPZ”追加写入，已有episode不会被覆盖。它同时保存未裁剪的
+完整网络输出`policy_action`、经安全裁剪后发给Bridge的`command_action`、真机实际执行前缀
+`actual_action`、供critic使用的`critic_action`、`executed_mask`、`intervention_mask`、
+`terminated`和`truncated`。ACT loss只使用实际执行前缀；完整原始policy chunk保留用于
+策略越界和裁剪率审计。普通时间上限使用`truncated=True`，成功、失败或安全终止使用
+`terminated=True`。
 
-### 6.7 离线/在线混合更新
+### 6.7 在线Replay完整性审计
 
-learner只读取Replay，不连接Bridge。默认`offline_fraction=0.5`：
+任何在线更新前必须先审计，`ok`不为`true`时禁止训练：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+
+PYTHONPATH="$PWD/src:/home/xlb/code/lerobot/src" \
+/home/xlb/miniconda3/envs/lerobot_xlb/bin/python \
+  -m act_rl.scripts.audit_online_replay \
+  --replay outputs/act_rl_online_round_001_mock_replay \
+  --config configs/act_rl/marvin_online_round1.json \
+  --output outputs/act_rl_online_round_001_mock_replay/audit.json
+```
+
+审计检查schema版本、24维state、30×5动作、四路图像、NaN/Inf、安全命令边界、实际执行
+步数、padding、提前终止、成功/失败/截断和policy SHA256。同一轮只允许一个已知
+policy SHA256；collector和审计器都会拒绝混入其他策略的目录。旧版Replay默认被拒绝，
+不能与阶段一正式在线数据混用。`train_online`在加载大模型前会自动重复同一套严格审计，
+手工遗漏本节也不会将损坏的Replay用于更新。
+
+### 6.8 第一阶段离线/在线混合更新
+
+learner只读取固定Replay快照，不连接Bridge。默认按在线transition数量自动调整：少于1000
+条时offline:online为75:25，1000～4999条时为50:50，达到5000条后为25:75。在线池使用
+50%最近窗口和50%全池的带放回采样，并近似平衡成功/失败、提高人工干预样本权重。
 
 ```bash
 cd /home/xlb/code/强化微调ACT
@@ -524,29 +716,99 @@ HF_HOME="$PWD/.cache/huggingface" \
 PYTHONPATH="$PWD/src:/home/xlb/code/lerobot/src" \
 /home/xlb/miniconda3/envs/lerobot_xlb/bin/python \
   -m act_rl.scripts.train_online \
-  --config configs/act_rl/marvin_offline_iql.json \
-  --model-checkpoint outputs/act_rl_offline_iql/checkpoints/step_00010000/pretrained_model \
-  --learner-checkpoint outputs/act_rl_offline_iql/checkpoints/step_00010000.pt \
+  --config configs/act_rl/marvin_online_round1.json \
+  --model-checkpoint outputs/act_rl_offline_iql/checkpoints/step_00050000/pretrained_model \
+  --learner-checkpoint outputs/act_rl_offline_iql/checkpoints/step_00050000.pt \
   --dataset-root datasets/marvin_usb_act_rl_offline \
   --repo-id xlb/marvin_usb_act_rl_offline \
   --outcomes datasets/marvin_usb_act_rl_offline/meta/rl_outcomes.json \
   --exclude-episodes 556 \
-  --online-replay outputs/act_rl_online_replay \
-  --output-dir outputs/act_rl_online_mixed \
+  --online-replay outputs/act_rl_online_round_001_replay \
+  --output-dir outputs/act_rl_online_round_001_train \
   --device cuda \
-  --steps 10000 \
-  --save-freq 1000 \
+  --steps 300 \
+  --save-freq 100 \
   --num-workers 2
 ```
 
-### 6.8 真机在线采集安全门槛
+每个混合batch都更新Q1/Q2、V和Target Q；ACT默认每2个critic step更新1次，ResNet保持冻结。
+默认限制每条在线transition最多对应4次learner更新；请求步数超过限制会直接失败。只有在
+明确审计过重放风险后才能使用`--allow-high-replay-reuse`。模型checkpoint和learner
+checkpoint必须是同一步且actor权重完全一致，否则训练拒绝启动。
 
-真机collector必须先启动第10节的hardware Bridge，并在第6.6节命令末尾显式增加
-`--allow-real-robot`。它会实际reset并连续执行动作。只有完成失败数据审计、critic排序、
-Mock连续回合、动作越界率和checkpoint回退验证后才允许使用。在线learner产生candidate，
-不会自动替换collector当前策略。
+### 6.9 真机分轮采集安全门槛
 
-### 6.9 ACT与RL-ACT执行长度对比
+真机collector必须先按第10节启动带`--human-success-key`的hardware Bridge。第一轮固定
+使用离线IQL 50k模型采集10～20回合，SPACE标记成功，ESC标记失败：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+
+TORCH_HOME="$PWD/.cache/torch" \
+PYTHONPATH="$PWD/src:/home/xlb/code/lerobot/src" \
+/home/xlb/miniconda3/envs/lerobot_xlb/bin/python \
+  -m act_rl.scripts.collect_online \
+  --checkpoint outputs/act_rl_offline_iql/checkpoints/step_00050000/pretrained_model \
+  --output-dir outputs/act_rl_online_round_001_replay \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --device cuda \
+  --episodes 10 \
+  --max-decisions 20 \
+  --executed-steps 10 \
+  --gamma 0.99 \
+  --allow-real-robot
+```
+
+它会实际reset并连续执行动作。先完成Mock连续回合、动作越界率、失败键、超时截断、Replay
+审计和checkpoint回退验证。在线learner只产生candidate，不会自动替换collector策略；
+candidate通过离线评估、Mock、真机短程安全测试并经人工批准后，下一轮collector才切换，
+而且只能在回合reset边界切换。
+
+### 6.9.1 第一轮candidate加载与真机短测
+
+当前没有一个命令同时执行“采集→训练→自动切换Actor”。`collect_online`只采集，
+`train_online`只训练candidate，`act_rollout`只加载指定candidate测试。Bridge必须按第10节
+独立运行，以保留SPACE、ESC和Ctrl+C安全控制。
+
+第一轮300步更新后，最新candidate为`step_00050300`。重新启动hardware Bridge后，先执行
+1回合、5步、每次只执行1个动作的真机短测：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+TORCH_HOME=/home/xlb/code/强化微调ACT/.cache/torch PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/lerobot/src /home/xlb/miniconda3/envs/lerobot_xlb/bin/python -m lerobot_robot_marvin.act_rollout --checkpoint /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_001_train/checkpoints/step_00050300/pretrained_model --host 127.0.0.1 --port 8765 --device cuda --episodes 1 --max-steps 5 --n-action-steps 1 --fps 10 --allow-real-robot --log-level INFO
+```
+
+### 6.9.2 第二轮使用最新Actor采集与继续更新
+
+确认`step_00050300`短测安全后，第二轮collector显式加载该Actor，并写入全新Replay
+目录。不要继续向`round_001_replay`追加：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+TORCH_HOME=/home/xlb/code/强化微调ACT/.cache/torch PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/lerobot/src /home/xlb/miniconda3/envs/lerobot_xlb/bin/python -m act_rl.scripts.collect_online --checkpoint /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_001_train/checkpoints/step_00050300/pretrained_model --output-dir /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_002_replay --host 127.0.0.1 --port 8765 --device cuda --episodes 10 --max-decisions 20 --executed-steps 10 --gamma 0.99 --allow-real-robot
+```
+
+采集完成后先审计：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/lerobot/src /home/xlb/miniconda3/envs/lerobot_xlb/bin/python -m act_rl.scripts.audit_online_replay --replay /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_002_replay --config /home/xlb/code/强化微调ACT/configs/act_rl/marvin_online_round1.json --output /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_002_replay/audit.json
+```
+
+第二轮训练必须同时使用来自`step_00050300`的模型目录和learner `.pt`，不能与50k或
+其他步数混用：
+
+```bash
+cd /home/xlb/code/强化微调ACT
+TORCH_HOME=/home/xlb/code/强化微调ACT/.cache/torch HF_HOME=/home/xlb/code/强化微调ACT/.cache/huggingface PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/lerobot/src /home/xlb/miniconda3/envs/lerobot_xlb/bin/python -m act_rl.scripts.train_online --config /home/xlb/code/强化微调ACT/configs/act_rl/marvin_online_round1.json --model-checkpoint /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_001_train/checkpoints/step_00050300/pretrained_model --learner-checkpoint /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_001_train/checkpoints/step_00050300.pt --dataset-root /home/xlb/code/强化微调ACT/datasets/marvin_usb_act_rl_offline --repo-id xlb/marvin_usb_act_rl_offline --outcomes /home/xlb/code/强化微调ACT/datasets/marvin_usb_act_rl_offline/meta/rl_outcomes.json --exclude-episodes 556 --online-replay /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_002_replay --output-dir /home/xlb/code/强化微调ACT/outputs/act_rl_online_round_002_train --device cuda --steps 300 --save-freq 100 --num-workers 2 --log-freq 20
+```
+
+若完成300步，第二轮candidate将保存为`step_00050400`、`step_00050500`和
+`step_00050600`。若当轮少于75条transition，应降低`--steps`，不要直接使用
+`--allow-high-replay-reuse`。
+
+### 6.10 ACT与RL-ACT执行长度对比
 
 详细指标、last/offline-best/real-best定义和记录模板见
 `ACT强化微调详细审计与测试方案.md`。两个模型的网络chunk均为30；以下只改变每次推理后
@@ -1061,18 +1323,24 @@ PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code_marvin/hil-serl:/ho
   --host 127.0.0.1 \
   --port 8765 \
   --human-success-key \
+  --human-outcome-input footswitch \
   --allow-hardware \
   --confirm-hardware-risk=I_UNDERSTAND_THIS_CONTROLS_A_REAL_ROBOT \
   --log-level INFO
 ```
 
-键盘监听：
+人工结果输入由`--human-outcome-input`切换，两种模式互斥：
 
 ```text
-SPACE    标记成功并结束当前回合
-ESC      标记失败并结束当前回合
-Ctrl+C   终止 Bridge；环境关闭并释放机器人和相机
+--human-outcome-input keyboard     SPACE=成功，ESC=失败/复位
+--human-outcome-input footswitch  Shift+←=成功，Shift+→=失败/复位
+Ctrl+C                            终止 Bridge；环境关闭并释放机器人和相机
 ```
+
+正式脚踏板命令使用`footswitch`；若改用键盘，只需把命令中的`footswitch`改为
+`keyboard`并重启Bridge。脚踏板模式下Space/Esc不会标记回合，键盘模式下
+Shift+方向键不会标记回合。脚踏失败键不是硬件急停；碰撞、失控或通信异常时
+仍必须优先使用机器人急停。
 
 当前方案不要添加 `--classifier`。如果将来恢复奖励分类器，只能在
 `--classifier` 和 `--human-success-key` 中选择一个，不能同时使用。
@@ -1176,6 +1444,127 @@ manager关闭前先终止并回收，避免正常退出时出现`ConnectionReset
 
 ## 13. 指令同步记录
 
+- 2026-08-21：Human40 Residual TD3的online ReplayBuffer改为固定
+  `marvin_<配置哈希>_incremental` memmap缓存。learner启动时校验已缓存episode的manifest哈希，
+  只从权威NPZ replay补导入新增episode；gRPC每收到一个完整episode后立即刷新memmap长度、writer
+  状态和原子元数据。正常中断后下次直接加载已提交缓存，不再因完整replay指纹变化而重建全部
+  online buffer；episode被删除或修改时会隔离不匹配缓存并安全重建。现有训练、Bridge和collector
+  命令均不变。
+
+- 2026-08-21：Human40 Residual TD3正式配置的`checkpoint_interval`从100改为
+  1,000 learner step，并将`training_checkpoint_keep_last=0`定义为禁用清理；
+  每个1,000-step编号完整checkpoint都永久保留，`latest.pt`和部署actor同步更新。
+  每个完整checkpoint约650 MB，训练到300,000 step最多需要约195 GB存储。
+
+- 2026-08-21：`--human-success-key`新增`--human-outcome-input`互斥切换；
+  `keyboard`模式只监听`SPACE=success`、`ESC=failure`，`footswitch`模式只监听
+  `Shift+←=success`、`Shift+→=failure/reset`。脚踏失败会终止当前回合、传递
+  `set_last_episode_result(False)`，并由collector进入下一次失败复位；它不替代硬件急停。
+  修改后必须重启hardware Bridge才能生效。
+
+- 2026-08-20：修复`HilserlBackend.step()`在`--human-success-key`模式下未向底层
+  Marvin环境传递人工回合结果的问题；Space=success传入`True`、ESC=failure传入`False`，
+  使`RESET_BY_EPISODE_RESULT`能够在下一回合正确选择自动USB复位或人工复位。修改后必须重启hardware Bridge。
+
+- 2026-08-20：人工失败复位在机械臂归位并张爪后增加默认`2.0s`等待
+  (`MANUAL_RESET_SETTLE_TIME`)，给操作者重新放置USB的时间，避免下一回合在USB尚未放置时立即开始。
+
+- 2026-08-20：修正Hydra命令中包含中文目录的覆盖值；不再把嵌套引号传入路径，统一通过
+  `ACT_POLICY`、`ACT_REPLAY`、`ACT_TRAIN`、`ACT_RESIDUAL`环境变量和
+  `marvin.key='${oc.env:变量名}'`插值传递，避免`LexerNoViableAltException`及路径中残留引号。
+  同时固定learner让行参数为`0.05`，禁止误写为`0.0505`。
+
+- 2026-08-19：新增Residual离线状态分布科学分析脚本与四面板导出，固定对比ACT base、RL step 11000和step 11050的residual幅度、逐维修正、示范方向一致性及真机成功率；结果输出到`outputs/residual_effect_analysis`，不修改训练数据或replay。
+- 2026-08-18：新增Residual倒数第二个actor（step 11000）独立部署文件和20回合真机评估命令；评估输出固定到`eval_act_residual_step11000_chunk20_exec5`，不覆盖step 11050评估结果或正式训练replay。
+- 2026-08-18：Residual gRPC learner补齐结构化W&B日志并将正式`marvin_residual.yaml`改为
+  `mode=online`；固定run ID `marvinresidualc20e5s1000`使`latest.pt`续训写入同一远程run。
+  远程每100步记录损失、Q值、梯度、Residual幅值/饱和率、buffer、累计在线成功率及吞吐，
+  critic warm-up也同步。修复LeRobot参数队列为空时每秒近千条日志的busy-loop，避免CPU和远程
+  console被无效`Push parameters`日志占用。
+- 2026-08-18：Residual Marvin由分轮运行升级为gRPC长驻actor/learner。复用vendored
+  LeRobot `LearnerService`、protobuf分块传输和重试；actor异步发送episode，learner增量训练并
+  每50步发布actor+encoder，actor仅在episode边界换参。learner/actor CUDA显存上限分别为
+  80%/18%，learner每个UTD=4更新组后让行10ms。`resume_checkpoint=auto`自动恢复
+  `latest.pt`；正式actor改为`--async-grpc --continuous`，不再手工切换采集和训练。
+- 2026-08-18：Residual Marvin参考HIL-SERL/RLPD拆分actor与learner。正式`marvin_residual.yaml`
+  默认`learner_only=true`，learner不构造环境、不连接Bridge；actor继续使用`collect_marvin`并通过
+  schema 5原子NPZ向learner传递完整回合，learner通过原子PyTorch部署checkpoint向下一轮actor发布
+  参数。单RTX 4090采用分轮而非同时运行：每轮500 learner step、UTD=4、每100步保存，collector
+  固定candidate采集5回合后再续训。critic warm-up完成后在任何真机RPC之前立即保存step 0断点；
+  完整编号断点默认仅保留最新两个，以控制磁盘占用。
+- 2026-08-18：Residual路线1正式真机TD3的`critic_warmup_steps`由10,000临时调整为1,000，
+  用于缩短首次真机联调；正式启动命令不变，仍由`marvin_residual.yaml`读取该值。
+- 2026-08-18：Residual Marvin的ACT receding horizon改为`chunk_size=20`、
+  `n_action_steps=5`：每次预测20个动作，逐步执行前5个后重新观测和推理；Residual仍每步
+  输出一个5维修正。Replay升级为schema 5并绑定这两个参数，新正式路径固定为
+  `/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3_chunk20_exec5`；旧`20/20`数据保留但禁止混用。
+- 2026-08-18：Residual collector与learner新增0.5秒Bridge heartbeat，覆盖ACT推理、TD3更新和Replay
+  写盘的长空闲期，避免2秒watchdog误触发终止式急停；修复hardware stop并发清理时`env=None`竞态、
+  非终止步骤重复消耗ACT队列动作及terminal后collector二次reset。正式采集命令恢复为
+  `--episodes 1 --min-transitions 1000 --resume`，从已有回放继续补足而不是每次重启再强制新增6回合。
+- 2026-08-18：Residual路线1真机在线Replay启动门槛由10,000条调整为1,000条可用n-step样本，
+  正式collector至少采集6个回合；6个完整200步回合约产生1,188条可用样本，提前终止时自动续采。
+  此次修改时critic-only warm-up仍保留发布代码的10,000次；随后同日为首次真机联调单独降为1,000次。
+- 2026-08-18：Residual路线1真机TD3升级为正式`marvin_residual_td3`链路：replay采用schema 4并绑定
+  ACT权重、离线数据统计、坐标契约和动作硬边界；`--min-transitions`按n-step转换后的可用样本计数，
+  learner强制达到配置的可用在线样本门槛。修复128×128四相机ViT位置嵌入、CPU在线回放/GPU actor
+  推理设备边界和terminal final_obs维度；critic warm-up移到首次真机reset之前，在线回合原子持久化。
+  新增正式Hydra配置、回放审计、完整agent/optimizer周期检查点、`latest.pt`断点续训和独立部署actor，
+  正式路径固定为`/home/xlb/code/强化微调ACT/outputs/marvin_residual_td3`。
+- 2026-08-18：新增Residual路线1 LeRobot 0.1.0 `best_eval/policy`真机5步测试流程：hardware
+  Bridge与ACT客户端均使用显式Conda解释器；ACT客户端固定正确的系统cuDNN 9.25/CUDA 13
+  运行库，使用RL v2.1数据统计量并设置零residual、1回合、5步及`--allow-real-robot`安全门。
+  明确客户端结束第5步时会自动reset，测试前必须准备急停且禁止其他客户端同时连接。
+- 2026-08-17：Residual LeRobot 0.1.0 BC新增episode级离线hold-out eval；正式命令使用
+  `eval_fraction=0.1`、`split_seed=1000`，得到525回合/44,994帧训练集和58回合/
+  4,579帧验证集；state/action/image归一化统计严格只使用训练回合。验证集关闭图像增强，
+  每2,000 step计算完整`eval_loss`，保存
+  `dataset_split.json`、`best_eval_metrics.json`和`best_eval/policy`；Residual RL默认选用
+  `best_eval/policy`而不是最后一个checkpoint。RTX 4090正式数据train+eval单步smoke已通过。
+- 2026-08-17：Residual的CUDA 13 pip cuDNN 9.20包缺少运行时延迟加载的
+  `libcudnn_engines_tensor_ir.so.9`，因而会与系统cuDNN 9.25引擎混用并触发
+  `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`。Residual BC CUDA命令改为清除外部CUDA/
+  preload设置，并完整使用系统cuDNN 9.25与环境CUDA 13运行库。RTX 4090上的
+  convolution forward/backward和正式四相机BC单步训练均已通过。此修复不改动数据或
+  checkpoint格式。
+- 2026-08-17：Residual Marvin恢复论文/原始代码的坐标链：在离线数据与在线环境中使用
+  同一`StateStandardizer`和`ActionScaler`，在归一化空间相加base action与residual后再
+  反缩放为机器人命令；修复离线ACT queue跨episode污染。Marvin base policy改为直接
+  加载路线1 LeRobot 0.1.0 ACT checkpoint，移除0.6.2 `ACTPolicyRunner`依赖。同步更新
+  `collect_marvin`的offline dataset参数、Residual RL默认数据路径和807回合设置；
+  BC入口在WandB关闭时不再调用`wandb.log`，并持久保留`--output_dir`中的checkpoint。
+  默认`sampling_strategy=uniform`现在使用普通TensorDict replay buffer，不再误创建依赖
+  TorchRL C++ segment tree的prioritized buffer；只有显式选择prioritized replay时才要求该扩展。
+  Marvin NPZ replay升级为schema 3并显式标记`resfit_normalized_v1`，learner拒绝旧原始坐标
+  replay；离线buffer cache加入ACT权重SHA256，避免更换base checkpoint后误用旧cache。
+- 2026-08-17：新增`convert_marvin_v3_to_residual_v21.py`，将当前Marvin LeRobot v3的BC与
+  failure-aware RL数据转换为ResFiT固定LeRobot可读取的v2.1逐episode布局；RL输出保留原标签并
+  从episode边界生成`next.done`，四相机feature显式写入CHW轴名供旧版policy factory识别；
+  转换阶段排除BC episode 359和RL episode 556两个异常1帧回合，BC改用持续目标夹爪源数据。
+  默认使用嵌入式image parquet，规避`residual`环境当前
+  TorchCodec/TorchVision视频解码ABI不兼容，正式BC/RL输出路径分别固定在
+  `/home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_bc`和
+  `/home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl`。
+- 2026-08-17：Residual off-policy Marvin 适配改在父仓库`/home/xlb/code/residual-offpolicy-rl`分支
+  `feature/marvin-residual-offpolicy`中维护；新增`collect_marvin`单机器人采集入口、
+  `marvin_residual_td3_config`配置和本地LeRobot ACT checkpoint参数，使用独立NPZ replay目录，
+  禁止Residual learner在Marvin真机上自动随机warm-up。
+- 2026-08-17：ResFiT Marvin配置补充本地`marvin_usb_act_success` offline dataset，强制使用冻结ACT
+  生成`observation.base_action`；Marvin Bridge reward统一为sparse binary（成功为1，否则为0），
+  并修正terminal replay的`final_obs` base action保存逻辑。
+- 2026-08-17：撤回自动分类器成功判定及HIL-SERL/Bridge行为改动，保留原始SpaceMouse wrapper；
+  本次Residual真机流程由操作者不触碰SpaceMouse，并使用Bridge键盘监听`--human-success-key`。
+  Residual层统一按`raw_reward > 0.8`映射为成功1，其余为0；ResFiT learner支持保存
+  `marvin.residual_checkpoint` actor bundle，`collect_marvin`支持`--residual-checkpoint`正式在线采集。
+- 2026-08-14：补充ACT-RL分轮闭环指令：第一轮`step_00050300`真机5步短测、
+  第二轮使用50300采集到独立Replay、审计，并使用严格配对的model/learner继续训练到50600；
+  明确当前不自动切换Actor，Bridge仍独立运行。新增命令均使用完整单行，避免续行符丢失。
+- 2026-08-14：ACT-RL第一阶段分轮在线训练升级为Replay v2：同时保存未裁剪policy、
+  安全command、actual/critic action与执行/干预mask，正确区分`terminated`和`truncated`；
+  新增Replay强制审计、训练前自动再审计与单轮policy SHA256限制、
+  checkpoint权重配对、按在线transition数量自动75:25/50:50/25:75混合、近期/历史及
+  成功/失败/干预分层采样、每条在线数据最多4次更新保护和默认2:1 critic-to-actor频率；
+  在线默认改为300步、每100步保存，并将起始模型统一为离线IQL step 50000。
 - 2026-08-12：加入ACT-RL failure-aware数据转换、离线IQL、checkpoint检查、Mock在线
   采集、离线/在线混合更新和真机安全门槛；补充长路径不可中途换行的Shell规则。
 - 2026-08-12：正式数据检查为808回合/90,119帧；训练显式排除异常1帧episode 556，
@@ -1203,3 +1592,53 @@ manager关闭前先终止并回收，避免正常退出时出现`ConnectionReset
   修改后需重启hardware Bridge，历史在线buffer不追溯重算。
 - 后续更新要求：凡是CLI参数、默认配置、数据目录、checkpoint结构或真机安全流程发生
   变化，都同时修改对应章节并在这里增加一条日期记录。
+- 2026-08-19：新增两份HIL-SERL纯人工demo pickle（各20回合，共40回合、4,707帧）
+  的独立转换命令；通过重复`--reference-demo-pkl`合并两个文件，并设置
+  `--max-online-episodes 0`，避免把旧checkpoint中的在线回合混入新数据。输出固定为
+  `/home/xlb/code/强化微调ACT/datasets/marvin_usb_human40_20260819`，不覆盖已有ACT/Residual数据集。
+- 2026-08-19：新增纯人工40回合数据的ACT BC训练命令；训练数据根目录固定为
+  `/home/xlb/code/强化微调ACT/datasets`，输出固定为
+  `/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_bc`，启用episode级10% hold-out
+  验证和W&B在线记录，项目名为`marvin-act-human40-bc`。
+- 2026-08-19：修复`convert_marvin_v3_to_residual_v21.py`对LeRobot v3内嵌PNG图像
+  (`video_path: null`)的兼容；现在`--media-storage image`可直接从parquet的
+  `observation.images.*.bytes`读取四路相机，不再错误调用视频路径格式化。
+- 2026-08-19：新增human40 ACT checkpoint的Residual真机rollout命令；冻结
+  `marvin_usb_human40_act_bc/best_eval/policy`作为base policy，零residual采集到独立
+  `/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_rollout/replay`，避免覆盖旧的
+  `marvin_residual_td3_chunk20_exec5/replay`。
+- 2026-08-19：明确Residual LeRobot 0.1.0 BC训练必须读取v2.1数据目录，不能直接把
+  v3的`marvin_usb_human40_20260819`作为`--dataset`；human40 BC训练应使用
+  `HF_LEROBOT_HOME=/home/xlb/code/强化微调ACT/datasets/residual_v21`和数据集名
+  `marvin_usb_human40_bc`，避免因缺少`meta/tasks.jsonl`回退到不存在的Hugging Face repo。
+- 2026-08-19：human40 BC中断后，真机rollout默认加载
+  `/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_bc/latest/policy`，并将新回放写入
+  `/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_rollout/replay`，不覆盖旧Residual回放。
+- 2026-08-19：修正`collect_marvin`的offline数据路径说明；该入口的
+  `--offline-dataset-root`必须直接指向具体数据集目录
+  `/home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl`，不能指向其父目录
+  `residual_v21`，否则会因找不到`meta/info.json`而错误回退到Hugging Face查询。
+- 2026-08-19：human40数据重新按持续目标夹爪语义转换；先生成
+  `/home/xlb/code/强化微调ACT/datasets/marvin_usb_human40_20260819_dense_gripper`，再生成
+  `/home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_human40_bc`（40回合/4707帧）。
+  原稀疏v3目录`marvin_usb_human40_20260819`已删除；旧稀疏夹爪ACT checkpoint不得继续用于
+  rollout，必须重新训练dense BC后再采集Residual数据。
+- 2026-08-19：新增`analysis/act_offline_analysis.py`，对dense human40 ACT执行逐帧离线推理，
+  输出参考动作/预测动作的均值、方差、MAE、RMSE、episode级积分动作轨迹误差，以及train/eval
+  分组图表；默认比较每个样本新建20步ACT队列后的第一个动作。
+- 2026-08-19：human40 dense ACT rollout已完成审计：11回合/1109原始transition、
+  1087条`n_step=3`可用transition，`ready=true`。Residual TD3必须使用
+  `/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_rollout/replay`和新的
+  dense ACT checkpoint，不能混用旧`marvin_residual_td3_chunk20_exec5`断点。
+- 2026-08-20：Residual TD3离线Replay缓存命中时改用`LazyMemmapStorage`直接打开磁盘
+  memmap，避免每次启动把约35GB图像缓存复制到内存；首次生成缓存仍按原流程执行，后续
+  启动应直接复用`outputs/marvin_usb_human40_residual_td3_chunk20_exec5/cache/offline_buffer_cache`。
+- 2026-08-20：进一步修复Residual TD3缓存命中启动流程；先读取轻量LeRobot metadata/statistics，
+  只有缓存不存在时才构造完整`LeRobotDataset`并扫描14个Arrow分片，避免每次启动重复映射
+  `marvin_usb_rl`的全部离线数据。
+- 2026-08-20：为Residual TD3启动流程增加`flush`阶段日志，分别标记离线缓存检查、W&B初始化、
+  critic warm-up决策、checkpoint保存和learner loop入口，便于定位启动阶段停顿位置。
+- 2026-08-20：补充QAgent构建完成、learner checkpoint开始/完成恢复日志，区分视觉网络初始化和
+  ReplayBuffer/W&B阶段的耗时。
+- 2026-08-20：为Marvin在线NPZ回放增加episode manifest指纹缓存；首次导入147个NPZ后写入
+  memmap，后续清单不变时直接加载在线ReplayBuffer，新增episode会自动生成新的缓存指纹。

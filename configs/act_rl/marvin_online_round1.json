@@ -1,0 +1,47 @@
+{
+  "network": {
+    "state_dim": 24,
+    "action_dim": 5,
+    "chunk_size": 30,
+    "executed_steps": 10,
+    "critic_horizon": 10,
+    "hidden_dims": [512, 512, 256],
+    "use_images": false,
+    "image_keys": [
+      "observation.images.side_policy",
+      "observation.images.wrist_1buchong",
+      "observation.images.wrist_1",
+      "observation.images.wrist_2"
+    ],
+    "image_feature_dim": 128
+  },
+  "iql": {
+    "gamma": 0.99,
+    "expectile": 0.7,
+    "temperature": 3,
+    "max_advantage_weight": 100,
+    "critic_lr": 0.0003,
+    "value_lr": 0.0003,
+    "actor_lr": 0.00003,
+    "backbone_lr": 0,
+    "target_tau": 0.005,
+    "prior_weight": 0.1,
+    "grad_clip_norm": 10,
+    "offline_fraction": 0.5
+  },
+  "online": {
+    "low_online_threshold": 1000,
+    "high_online_threshold": 5000,
+    "offline_fraction_low_data": 0.75,
+    "offline_fraction_mid_data": 0.5,
+    "offline_fraction_high_data": 0.25,
+    "recent_ratio": 0.5,
+    "recent_window": 10000,
+    "balance_outcomes": true,
+    "intervention_weight": 2.0,
+    "critic_to_actor_ratio": 2,
+    "max_updates_per_online_transition": 4.0
+  },
+  "batch_size": 8,
+  "seed": 1000
+}

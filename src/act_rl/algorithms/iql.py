@@ -48,7 +48,8 @@ class IQLACTLearner:
         with torch.no_grad():
             next_obs = self._obs(batch, True)
             target = batch.reward + batch.discount * (1.0 - batch.terminated) * self.value(next_obs)
-        critic_action = batch.action[:, : self.cfg.network.critic_horizon]
+        behavior_action = batch.critic_action if batch.critic_action is not None else batch.action
+        critic_action = behavior_action[:, : self.cfg.network.critic_horizon]
         q1, q2 = self.q(obs, critic_action)
         q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.q_optimizer.zero_grad(set_to_none=True)
@@ -72,7 +73,8 @@ class IQLACTLearner:
         batch = batch.to(self.device)
         with torch.no_grad():
             obs = self._obs(batch)
-            q1, q2 = self.target_q(obs, batch.action[:, : self.cfg.network.critic_horizon])
+            behavior_action = batch.critic_action if batch.critic_action is not None else batch.action
+            q1, q2 = self.target_q(obs, behavior_action[:, : self.cfg.network.critic_horizon])
             advantage = torch.minimum(q1, q2) - self.value(obs)
             weights = torch.exp(advantage * self.cfg.iql.temperature).clamp(max=self.cfg.iql.max_advantage_weight)
         loss, metrics = self.actor.weighted_loss(batch, weights, prior_weight=self.cfg.iql.prior_weight)

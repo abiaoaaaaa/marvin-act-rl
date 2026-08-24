@@ -29,6 +29,19 @@
     "grad_clip_norm": 10.0,
     "offline_fraction": 0.5
   },
+  "online": {
+    "low_online_threshold": 1000,
+    "high_online_threshold": 5000,
+    "offline_fraction_low_data": 0.5,
+    "offline_fraction_mid_data": 0.5,
+    "offline_fraction_high_data": 0.5,
+    "recent_ratio": 0.5,
+    "recent_window": 100,
+    "balance_outcomes": true,
+    "intervention_weight": 2.0,
+    "critic_to_actor_ratio": 2,
+    "max_updates_per_online_transition": 4.0
+  },
   "batch_size": 2,
   "seed": 1000
 }

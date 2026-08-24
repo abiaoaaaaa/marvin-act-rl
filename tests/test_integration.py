@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import time
 import unittest
 from socketserver import ThreadingMixIn
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from lerobot_robot_marvin.backends import HilserlBackend, MockBackend
+from lerobot_robot_marvin.backends import HilserlBackend, HumanOutcomeListener, MockBackend
 from lerobot_robot_marvin.act_rollout import sanitize_policy_action, validate_bridge_preflight
 from lerobot_robot_marvin.bridge_server import BridgeHTTPServer, BridgeService, make_backend
 from lerobot_robot_marvin.client import MarvinBridgeClient
@@ -356,6 +357,63 @@ class IntegrationTest(unittest.TestCase):
         self.assertFalse(info["succeed"])
         self.assertEqual(info["failure_reason"], "keyboard_esc")
         self.assertEqual(backend.env.step_calls, 0)
+
+    def test_human_footswitch_failure_is_identified(self):
+        backend = HilserlBackend(
+            classifier=False,
+            human_success_key=True,
+            human_outcome_input="footswitch",
+        )
+        backend.env = FakeHilserlEnv()
+        backend._last_observation = validate_observation(MockBackend()._observation())
+        backend._outcome_listener = FakeOutcomeListener("failure")
+        _, _, terminated, _, info = backend.step(np.zeros(5, np.float32))
+        self.assertTrue(terminated)
+        self.assertEqual(info["failure_reason"], "footswitch_shift_right")
+
+    def test_human_outcome_listener_switches_input_mode(self):
+        keys = SimpleNamespace(
+            shift="shift",
+            shift_l="shift_l",
+            shift_r="shift_r",
+            left="left",
+            right="right",
+            space="space",
+            esc="esc",
+        )
+        def make_listener(input_mode):
+            listener = HumanOutcomeListener.__new__(HumanOutcomeListener)
+            listener._keyboard = SimpleNamespace(Key=keys)
+            listener._input_mode = input_mode
+            listener._lock = threading.Lock()
+            listener._success = False
+            listener._failure = False
+            listener._pressed_shifts = set()
+            return listener
+
+        listener = make_listener("footswitch")
+        listener._on_press(keys.shift_l)
+        listener._on_press(keys.left)
+        self.assertEqual(listener.consume(), "success")
+        listener._on_release(keys.shift_l)
+        listener._on_press(keys.left)
+        self.assertIsNone(listener.consume())
+
+        listener._on_press(keys.shift_r)
+        listener._on_press(keys.right)
+        self.assertEqual(listener.consume(), "failure")
+        listener._on_press(keys.space)
+        listener._on_press(keys.esc)
+        self.assertIsNone(listener.consume())
+
+        listener = make_listener("keyboard")
+        listener._on_press(keys.space)
+        self.assertEqual(listener.consume(), "success")
+        listener._on_press(keys.esc)
+        self.assertEqual(listener.consume(), "failure")
+        listener._on_press(keys.shift_l)
+        listener._on_press(keys.left)
+        self.assertIsNone(listener.consume())
 
 
 if __name__ == "__main__":

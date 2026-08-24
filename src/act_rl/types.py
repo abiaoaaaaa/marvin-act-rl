@@ -49,6 +49,16 @@ class ChunkBatch:
     discount: Any
     terminated: Any
     action_is_pad: Any
+    # `action` is the behavior target used by the ACT loss.  `critic_action`
+    # is the action that actually caused reward/next_state.  They are equal
+    # without clipping/intervention, but must remain distinct online.
+    critic_action: Any = None
+    policy_action: Any = None
+    critic_action_is_pad: Any = None
+    truncated: Any = None
+    success: Any = None
+    intervention: Any = None
+    executed_steps: Any = None
     images: dict[str, Any] = field(default_factory=dict)
     next_images: dict[str, Any] = field(default_factory=dict)
     source: Any = None
@@ -58,7 +68,10 @@ class ChunkBatch:
         return ChunkBatch(
             state=move(self.state), action=move(self.action), next_state=move(self.next_state),
             reward=move(self.reward), discount=move(self.discount), terminated=move(self.terminated),
-            action_is_pad=move(self.action_is_pad), images={k: move(v) for k, v in self.images.items()},
+            action_is_pad=move(self.action_is_pad), critic_action=move(self.critic_action),
+            policy_action=move(self.policy_action), critic_action_is_pad=move(self.critic_action_is_pad),
+            truncated=move(self.truncated), success=move(self.success), intervention=move(self.intervention),
+            executed_steps=move(self.executed_steps), images={k: move(v) for k, v in self.images.items()},
             next_images={k: move(v) for k, v in self.next_images.items()}, source=self.source,
         )
 
@@ -71,12 +84,27 @@ def concatenate_batches(*batches: ChunkBatch) -> ChunkBatch:
     common_images = set.intersection(*(set(batch.images) for batch in batches))
     common_next_images = set.intersection(*(set(batch.next_images) for batch in batches))
     cat = lambda name: torch.cat([getattr(batch, name) for batch in batches], dim=0)
+    def cat_optional(name, fallback=None):
+        values = []
+        for batch in batches:
+            value = getattr(batch, name)
+            if value is None and fallback is not None:
+                value = getattr(batch, fallback)
+            if value is None:
+                return None
+            values.append(value)
+        return torch.cat(values, dim=0)
     sources = []
     for batch in batches:
         sources.extend(batch.source if isinstance(batch.source, list) else [batch.source] * len(batch.state))
     return ChunkBatch(
         state=cat("state"), action=cat("action"), next_state=cat("next_state"), reward=cat("reward"),
         discount=cat("discount"), terminated=cat("terminated"), action_is_pad=cat("action_is_pad"),
+        critic_action=cat_optional("critic_action", "action"),
+        policy_action=cat_optional("policy_action", "action"),
+        critic_action_is_pad=cat_optional("critic_action_is_pad", "action_is_pad"),
+        truncated=cat_optional("truncated"), success=cat_optional("success"),
+        intervention=cat_optional("intervention"), executed_steps=cat_optional("executed_steps"),
         images={key: torch.cat([batch.images[key] for batch in batches]) for key in common_images},
         next_images={key: torch.cat([batch.next_images[key] for batch in batches]) for key in common_next_images},
         source=sources,

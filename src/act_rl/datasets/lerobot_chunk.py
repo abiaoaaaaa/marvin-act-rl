@@ -68,6 +68,10 @@ class LeRobotChunkDataset(Dataset):
             "reward": torch.as_tensor(reward, dtype=torch.float32),
             "discount": torch.tensor(self.gamma**actual_h, dtype=torch.float32),
             "terminated": torch.tensor(terminal, dtype=torch.float32),
+            "truncated": torch.tensor(False, dtype=torch.float32),
+            "success": torch.tensor(success, dtype=torch.float32),
+            "intervention": torch.as_tensor(item.get("rl.intervention", False), dtype=torch.float32).reshape(-1)[0],
+            "executed_steps": torch.tensor(actual_h, dtype=torch.int64),
             "episode_index": item["episode_index"],
             "frame_index": item["frame_index"],
             "source": str(outcome.get("source", "offline")),
@@ -94,6 +98,9 @@ def make_delta_timestamps(dataset_root: str | Path, image_keys: tuple[str, ...],
     for key in ("rl.reward", "rl.terminated"):
         if key in features:
             delta[key] = [i / fps for i in range(executed_steps)]
+    for key in ("rl.success", "rl.intervention", "rl.safety_abort"):
+        if key in features:
+            delta[key] = [0.0]
     return delta
 
 
@@ -107,11 +114,29 @@ def prepare_lerobot_batch(raw: dict[str, Any], preprocessor, image_keys: tuple[s
         next_frame[key] = raw[f"next.{key}"]
     current = preprocessor(current)
     next_frame = preprocessor(next_frame)
+    critic_raw = raw.get("critic_action", raw["action"])
+    critic_pad = raw.get("critic_action_is_pad", raw["action_is_pad"])
+    policy_raw = raw.get("policy_action", raw["action"])
+    # Apply the checkpoint's action normalizer to auxiliary action tensors.
+    # Observation/image processing is intentionally omitted for these calls.
+    critic_processed = preprocessor({
+        "observation.state": raw["observation.state"],
+        "action": critic_raw,
+        "action_is_pad": critic_pad,
+    })
+    critic_action = critic_processed["action"]
+    critic_action = critic_action.masked_fill(critic_pad.to(critic_action.device).unsqueeze(-1), 0.0)
+    zeros = torch.zeros(len(raw["reward"]), dtype=torch.float32)
     return ChunkBatch(
         state=current["observation.state"], action=current["action"],
         next_state=next_frame["observation.state"], reward=raw["reward"],
         discount=raw["discount"], terminated=raw["terminated"],
         action_is_pad=current["action_is_pad"],
+        critic_action=critic_action, policy_action=policy_raw.to(critic_action.device),
+        critic_action_is_pad=critic_pad,
+        truncated=raw.get("truncated", zeros), success=raw.get("success", zeros),
+        intervention=raw.get("intervention", zeros),
+        executed_steps=raw.get("executed_steps"),
         images={key: current[key] for key in image_keys},
         next_images={key: next_frame[key] for key in image_keys}, source=raw.get("source"),
     )

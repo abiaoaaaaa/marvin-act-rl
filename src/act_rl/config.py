@@ -41,14 +41,32 @@ class IQLConfig:
 
 
 @dataclass
+class OnlineConfig:
+    """Conservative defaults for staged real-robot replay fine-tuning."""
+
+    low_online_threshold: int = 1000
+    high_online_threshold: int = 5000
+    offline_fraction_low_data: float = 0.75
+    offline_fraction_mid_data: float = 0.50
+    offline_fraction_high_data: float = 0.25
+    recent_ratio: float = 0.50
+    recent_window: int = 10_000
+    balance_outcomes: bool = True
+    intervention_weight: float = 2.0
+    critic_to_actor_ratio: int = 2
+    max_updates_per_online_transition: float = 4.0
+
+
+@dataclass
 class ACTRLConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     iql: IQLConfig = field(default_factory=IQLConfig)
+    online: OnlineConfig = field(default_factory=OnlineConfig)
     batch_size: int = 64
     seed: int = 1000
 
     def validate(self) -> None:
-        n, i = self.network, self.iql
+        n, i, online = self.network, self.iql, self.online
         if n.state_dim <= 0 or n.action_dim <= 0 or n.chunk_size <= 0:
             raise ValueError("state_dim, action_dim and chunk_size must be positive")
         if not 1 <= n.executed_steps <= n.chunk_size:
@@ -59,6 +77,16 @@ class ACTRLConfig:
             raise ValueError("IQL expectile must be in [0.5, 1)")
         if not 0.0 <= i.offline_fraction <= 1.0:
             raise ValueError("offline_fraction must be in [0, 1]")
+        if not 0 < online.low_online_threshold <= online.high_online_threshold:
+            raise ValueError("online thresholds must satisfy 0 < low <= high")
+        for value in (online.offline_fraction_low_data, online.offline_fraction_mid_data,
+                      online.offline_fraction_high_data, online.recent_ratio):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("online fractions and recent_ratio must be in [0, 1]")
+        if online.critic_to_actor_ratio < 1:
+            raise ValueError("critic_to_actor_ratio must be >= 1")
+        if online.max_updates_per_online_transition <= 0:
+            raise ValueError("max_updates_per_online_transition must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,7 +94,11 @@ class ACTRLConfig:
     @classmethod
     def from_json(cls, path: str | Path) -> "ACTRLConfig":
         raw = json.loads(Path(path).read_text())
-        cfg = cls(network=NetworkConfig(**raw.get("network", {})), iql=IQLConfig(**raw.get("iql", {})))
+        cfg = cls(
+            network=NetworkConfig(**raw.get("network", {})),
+            iql=IQLConfig(**raw.get("iql", {})),
+            online=OnlineConfig(**raw.get("online", {})),
+        )
         cfg.batch_size = int(raw.get("batch_size", cfg.batch_size))
         cfg.seed = int(raw.get("seed", cfg.seed))
         cfg.validate()
