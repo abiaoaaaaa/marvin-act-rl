@@ -134,14 +134,22 @@ class BridgeService:
                 action = validate_action(payload.get("action"))
                 observation, reward, terminated, truncated, info = self.backend.step(action)
                 self._last_observation = validate_observation(observation)
-                actual_action = validate_action(info.get("intervene_action", action))
+                requested_action = validate_action(info.get("intervene_action", action))
+                applied_command_action = validate_action(
+                    info.get("applied_command_action", requested_action)
+                )
                 transition = {
                     "observation": self._last_observation,
                     "reward": float(reward),
                     "terminated": bool(terminated),
                     "truncated": bool(truncated),
                     "succeed": bool(info.get("succeed", reward >= 0.5)),
-                    "actual_action": actual_action,
+                    "requested_action": requested_action,
+                    "applied_command_action": applied_command_action,
+                    # Backward-compatible alias. This is the safety-clipped
+                    # high-level command before controller smoothing.
+                    "actual_action": applied_command_action,
+                    "intervened": "intervene_action" in info,
                     "info": info,
                 }
                 self._last_transition = transition

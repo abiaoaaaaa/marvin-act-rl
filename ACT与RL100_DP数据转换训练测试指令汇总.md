@@ -1442,7 +1442,80 @@ manager关闭前先终止并回收，避免正常退出时出现`ConnectionReset
 共享相机别名可能重复执行关闭。这类关闭阶段日志不代表策略推理失败，但必须确认实体
 相机、SDK 和机器人最终已释放，下一次 Bridge 能正常初始化全部三台实体 RealSense。
 
+### Human40人工干预Residual v1（residual scale 0.2，2026-08-24）
+
+本实验继续冻结`marvin_usb_human40_act_dense_bc/latest/policy`，Residual输出范围从
+`[-0.1,0.1]`扩大为`[-0.2,0.2]`。训练Replay、部署actor和完整checkpoint均使用新目录；
+完整checkpoint写入大容量数据盘。第一次先用base ACT加SpaceMouse人工干预采集至少1,000条
+transition，之后从step 0新建Residual Actor、Critic和优化器，不读取旧实验checkpoint。启动时
+先执行1,000次仅Critic更新的warm-up，完成后保存并发布step 0模型，再进入正式Actor/Critic训练。
+
+Bridge（SpaceMouse负责动作干预，脚踏板`Shift+←`成功、`Shift+→`失败）：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code_marvin/hil-serl:/home/xlb/code_marvin/hil-serl/examples:/home/xlb/code_marvin/hil-serl/serl_robot_infra:/home/xlb/code_marvin/hil-serl/serl_launcher /home/xlb/miniconda3/envs/hilserl/bin/python -m lerobot_robot_marvin.bridge_server --backend hardware --host 127.0.0.1 --port 8765 --human-success-key --human-outcome-input footswitch --allow-hardware --confirm-hardware-risk=I_UNDERSTAND_THIS_CONTROLS_A_REAL_ROBOT --log-level INFO
+```
+
+首次采集（新Replay为空时执行；Residual为0，但SpaceMouse仍可全幅接管）：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_dense_bc/latest/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_intervention_scale02/replay --device cuda --host 127.0.0.1 --port 8765 --episodes 6 --max-steps 200 --min-transitions 1000 --n-step 3 --resume --residual-scale 0.0 --actor-action-scale 0.2 --min-action-range 0.1 --min-state-std 0.1 --gpu-memory-fraction 0.18 --allow-real-robot
+```
+
+Learner（全新初始化；先等待`Critic warmup completed.`和`Saved formal Marvin checkpoint step=0`）：
+
+```bash
+env WANDB_INIT_TIMEOUT=30 WANDB_DISABLE_GIT=true WANDB_DISABLE_CODE=true ACT_POLICY=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_dense_bc/latest/policy ACT_REPLAY=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_intervention_scale02/replay ACT_TRAIN=/home/xlb/data/数据存档/强化微调act/marvin_usb_human40_residual_td3_intervention_scale02/checkpoints ACT_RESIDUAL=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/deployment/residual_actor_latest.pt CACHE_DIR=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/cache OFFLINE_CACHE_DIR=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_chunk20_exec5/cache/offline_buffer_cache ONLINE_CACHE_DIR=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/cache/online_buffer_cache MPLCONFIGDIR=/home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/matplotlib env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.train_residual_td3 --config-path /home/xlb/code/residual-offpolicy-rl/resfit/rl_finetuning/config --config-name marvin_residual 'marvin.base_policy_checkpoint=${oc.env:ACT_POLICY}' 'marvin.replay_dir=${oc.env:ACT_REPLAY}' 'marvin.training_checkpoint_dir=${oc.env:ACT_TRAIN}' 'marvin.residual_checkpoint=${oc.env:ACT_RESIDUAL}' marvin.resume_checkpoint=null marvin.learner_only=true marvin.residual_scale=0.2 marvin.training_checkpoint_keep_last=0 agent.actor.action_scale=0.2 algo.critic_warmup_steps=1000 algo.batch_size=128 algo.num_updates_per_iteration=4 wandb.continue_run_id=marvinhuman40interventionscale02 wandb.name=marvin-human40-intervention-residual-td3-scale02 marvin.learner_gpu_memory_fraction=0.65 marvin.learner_update_sleep_s=0.05
+```
+
+`marvin.resume_checkpoint=null`只用于本实验第一次启动。第一次训练已经生成checkpoint后，如因正常中断
+需要继续同一实验，必须把它改为`marvin.resume_checkpoint=auto`；否则会再次从step 0初始化并重复warm-up。
+
+在线collector（learner完成启动发布后执行）：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_dense_bc/latest/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_rl_intervention_scale02/replay --device cuda --host 127.0.0.1 --port 8765 --max-steps 200 --min-transitions 0 --n-step 3 --resume --residual-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/deployment/residual_actor_latest.pt --residual-scale 0.2 --actor-action-scale 0.2 --min-action-range 0.1 --min-state-std 0.1 --async-grpc --learner-host 127.0.0.1 --learner-port 50051 --gpu-memory-fraction 0.18 --continuous --allow-real-robot
+```
+
+正式测试前停止learner和在线collector，但保留Bridge；测试过程中不得触碰SpaceMouse。Base ACT：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_dense_bc/latest/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/eval_human40_act_base_scale02_20260824 --device cuda --host 127.0.0.1 --port 8765 --episodes 50 --max-steps 200 --min-transitions 0 --n-step 3 --residual-scale 0.0 --actor-action-scale 0.2 --min-action-range 0.1 --min-state-std 0.1 --gpu-memory-fraction 0.18 --allow-real-robot
+```
+
+Residual scale 0.2：
+
+```bash
+env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/nvidia/cu13/lib:/home/xlb/miniconda3/envs/residual/lib/python3.10/site-packages/torch/lib NUMBA_DISABLE_JIT=1 PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/residual-offpolicy-rl /home/xlb/miniconda3/envs/residual/bin/python -m resfit.rl_finetuning.scripts.collect_marvin --base-policy-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_act_dense_bc/latest/policy --base-policy-chunk-size 20 --base-policy-n-action-steps 5 --offline-dataset-root /home/xlb/code/强化微调ACT/datasets/residual_v21/marvin_usb_rl --offline-dataset-name marvin_usb_rl --output-dir /home/xlb/code/强化微调ACT/outputs/eval_human40_residual_intervention_scale02_20260824 --device cuda --host 127.0.0.1 --port 8765 --episodes 50 --max-steps 200 --min-transitions 0 --n-step 3 --residual-checkpoint /home/xlb/code/强化微调ACT/outputs/marvin_usb_human40_residual_td3_intervention_scale02/deployment/residual_actor_latest.pt --residual-scale 0.2 --actor-action-scale 0.2 --min-action-range 0.1 --min-state-std 0.1 --gpu-memory-fraction 0.18 --allow-real-robot
+```
+
 ## 13. 指令同步记录
+
+- 2026-08-24：修复Human40 scale 0.2首次增量online缓存落盘时的TorchRL 0.9兼容问题。该版本会把
+  `MultiStepTransform`自动包装为`Compose`，现统一解析其中的真实transform后再保存/恢复n-step
+  短期上下文。若旧进程曾报`Compose object has no attribute _buffer`，无需删除权威NPZ Replay，
+  直接重新执行同一条首次learner命令即可；未生成`storage_metadata.json`的半成品缓存不会被加载。
+- 2026-08-24：修正Human40人工干预Residual v1的Bridge命令，补回真正创建人工结果监听器所必需的
+  `--human-success-key`。`--human-outcome-input footswitch`只选择监听模式，单独使用不会启动监听器；
+  Bridge启动后必须同时打印`Human outcome listener active: mode=footswitch`。
+- 2026-08-24：Human40人工干预动作链改为显式区分策略计划动作、人工请求动作和实际应用动作。
+  Marvin底层现在回传经过安全裁剪但尚未进入200 Hz圆滑/插值控制器的
+  `applied_command_action`，`RelativeFrame`将其转换回ACT/Residual使用的策略坐标；Bridge同时
+  返回`requested_action`、`applied_command_action`、兼容字段`actual_action`和`intervened`。
+  Collector把归一化后的`applied_action`写入NPZ，TD3 Critic优先使用该字段，旧episode依次回退
+  `actual_action`和`command_action`。online memmap缓存哈希加入动作来源版本，因此升级后首次启动
+  learner会重新导入一次权威NPZ，随后继续增量复用。ACT action queue本次不重置，Actor的
+  residual范围仍为`[-0.1,0.1]`。代码升级后必须先停止并重启hardware Bridge，再启动collector；
+  不得让旧Bridge与新collector混用。
+- 2026-08-24：新增Human40人工干预Residual v1训练/测试流程，Residual Actor输出范围从
+  `[-0.1,0.1]`扩大为`[-0.2,0.2]`，使用独立Replay、部署actor和数据盘checkpoint目录；新实验
+  先采集至少1,000条base ACT加SpaceMouse干预transition，再从旧实验完整`step=45000`
+  checkpoint恢复。新增`OFFLINE_CACHE_DIR`和`ONLINE_CACHE_DIR`覆盖项，在复用旧33GB offline
+  cache的同时隔离新online cache。恢复learner会立即发布带新`action_scale`的actor；W&B新增累计
+  干预步数、干预episode数和干预episode比例。正式评估时停止learner/collector且不得触碰SpaceMouse。
+- 2026-08-24：Human40人工干预Residual v1改为从step 0随机初始化Residual Actor、Critic和优化器，
+  learner命令显式使用`marvin.resume_checkpoint=null`，不再读取旧`step=45000`checkpoint；启动时执行
+  1,000次Critic-only warm-up，随后保存并发布step 0模型。Replay、offline cache和base ACT保持不变。
 
 - 2026-08-21：Human40 Residual TD3的online ReplayBuffer改为固定
   `marvin_<配置哈希>_incremental` memmap缓存。learner启动时校验已缓存episode的manifest哈希，

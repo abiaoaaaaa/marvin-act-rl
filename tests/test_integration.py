@@ -123,6 +123,14 @@ class SlowStopBackend(MockBackend):
         super().stop(reason)
 
 
+class AppliedActionBackend(MockBackend):
+    def step(self, action):
+        observation, reward, terminated, truncated, info = super().step(action)
+        info["intervene_action"] = np.array([0.9, 0.0, 0.0, 0.0, 0.0], np.float32)
+        info["applied_command_action"] = np.array([0.8, 0.0, 0.0, 0.0, 0.0], np.float32)
+        return observation, reward, terminated, truncated, info
+
+
 class FakeInputProcess:
     def __init__(self, events):
         self.events = events
@@ -189,6 +197,17 @@ class IntegrationTest(unittest.TestCase):
         robot.disconnect()
         self.assertGreaterEqual(fixture.backend.stop_calls, 1)
         self.assertEqual(fixture.backend.disconnect_calls, 1)
+
+    def test_bridge_returns_safety_clipped_pre_smoothing_action(self):
+        fixture = Fixture(AppliedActionBackend())
+        self.addCleanup(fixture.close)
+        fixture.client.connect()
+        fixture.client.reset()
+        transition = fixture.client.step(np.array([0.2, 0.0, 0.0, 0.0, 0.0], np.float32))
+        np.testing.assert_allclose(transition["requested_action"], [0.9, 0.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(transition["applied_command_action"], [0.8, 0.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(transition["actual_action"], transition["applied_command_action"])
+        self.assertTrue(transition["intervened"])
 
     def test_invalid_actions_fail_safe_stop(self):
         for invalid in (float("nan"), 1.1):

@@ -79,6 +79,13 @@ class MarvinBridgeClient:
             raise
         result["observation"] = validate_observation(result["observation"])
         result["actual_action"] = validate_action(result["actual_action"])
+        result["requested_action"] = validate_action(
+            result.get("requested_action", result["actual_action"])
+        )
+        result["applied_command_action"] = validate_action(
+            result.get("applied_command_action", result["actual_action"])
+        )
+        result["intervened"] = bool(result.get("intervened", False))
         return result
 
     def stop(self, reason: str = "client requested stop") -> dict:
