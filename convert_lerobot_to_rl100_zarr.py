@@ -56,13 +56,28 @@ def parse_args() -> argparse.Namespace:
 
 def fixed_list_to_numpy(column, width: int) -> np.ndarray:
     array = column.combine_chunks()
-    if array.type.list_size != width:
-        raise ValueError(f"Expected fixed list width {width}, got {array.type}")
+    if hasattr(array.type, "list_size"):
+        actual_width = array.type.list_size
+    elif hasattr(array.type, "value_type") and array.type.value_type is not None:
+        offsets = array.offsets.to_numpy(zero_copy_only=False)
+        actual_width = int(offsets[1] - offsets[0])
+    else:
+        actual_width = None
+    if actual_width != width:
+        raise ValueError(f"Expected list width {width}, got {array.type}")
     return (
         array.values.to_numpy(zero_copy_only=False)
         .reshape(len(array), width)
         .astype(np.float32, copy=False)
     )
+
+
+def list_width(column) -> int:
+    array = column.combine_chunks()
+    if hasattr(array.type, "list_size"):
+        return int(array.type.list_size)
+    offsets = array.offsets.to_numpy(zero_copy_only=False)
+    return int(offsets[1] - offsets[0])
 
 
 def _scalar_column_to_numpy(column, dtype) -> np.ndarray:
@@ -86,8 +101,8 @@ def load_tabular_data(source_root: Path, include_rl: bool = False) -> dict[str, 
             ["rl.reward", "rl.terminated", "rl.success", "rl.intervention", "rl.safety_abort"]
         )
     table = pq.read_table(parquet_files, columns=columns)
-    state_width = table.schema.field("observation.state").type.list_size
-    action_width = table.schema.field("action").type.list_size
+    state_width = list_width(table["observation.state"])
+    action_width = list_width(table["action"])
     result = {
         "state": fixed_list_to_numpy(table["observation.state"], state_width),
         "action": fixed_list_to_numpy(table["action"], action_width),

@@ -912,12 +912,58 @@ meta/source_episode_index
 
 脚本使用临时目录写入，全部成功后才重命名为最终目录。不要在转换过程中强制终止。
 
+### 7.3 zadai_354 清洗后转换说明
+
+本地 zadai 数据源为 `/home/xlb/data/lerobot/zadai_354`。经核验，episode 335–353 的
+`observation.images.wrist_R` 是全黑视觉脏数据；必须删除完整回合，不能只删除右腕图像，
+否则图像、state、action 会失去 episode 对齐。已生成不覆盖原始数据的清洗副本：
+
+```text
+/home/xlb/data/lerobot/zadai_335_cleaned
+335 episodes / 424,905 frames / 16-dim state / 16-dim action
+3 cameras: top, wrist_L, wrist_R
+```
+
+当前 `marvin_usb` RL-100 配置不能直接使用该数据：它硬编码了 4 路相机、24 维 state 和
+5 维 action。zadai 需要单独的 3 路相机、16 维 state/action dataset adapter 与 task 配置；
+不能仅把 `task=marvin_usb` 的数据路径替换成 zadai。底层 Zarr 转换器已兼容 zadai 的普通
+Arrow `list<float>` 字段，冒烟转换命令如下：
+
+```bash
+/home/xlb/miniconda3/envs/rl100/bin/python \
+  /home/xlb/code/强化微调ACT/convert_lerobot_to_rl100_zarr.py \
+  --source-root /home/xlb/data/lerobot/zadai_335_cleaned \
+  --output-zarr /home/xlb/code/RL-100/RL-100/data/zadai_335_cleaned_smoke.zarr \
+  --camera-keys top wrist_L wrist_R \
+  --max-episodes 2
+```
+
+该数据适合先做 RL-100 DP 的 BC/行为克隆验证；目前不含 `reward/done/success`，不能直接
+进入第二阶段离线 IQL/BPPO。若目标是 DP BC，335 回合和 42.49 万帧规模足够做首轮实验；
+若目标是离线 RL，还需要补充可靠的回合级 reward、terminal/success 标注。
+
+### 7.4 zadai 全量 Zarr 转换
+
+新增任务配置为 `/home/xlb/code/RL-100/RL-100/rl_100/config/task/marvin_zadai.yaml`，
+复用 `MarvinDataset` 但使用 3 路相机、原始 `480×640` 输入和 16 维 state/action；训练时不做
+resize：
+
+```bash
+/home/xlb/miniconda3/envs/rl100/bin/python \
+  /home/xlb/code/强化微调ACT/convert_lerobot_to_rl100_zarr.py \
+  --source-root /home/xlb/data/lerobot/zadai_335_cleaned \
+  --output-zarr /home/xlb/data/zadai_335_cleaned.zarr \
+  --camera-keys top wrist_L wrist_R
+```
+
+输出目录必须不存在；转换完成后用 `task=marvin_zadai`，不能复用 `task=marvin_usb`。
+
 ## 8. RL-100 DP 训练
 
 当前配置：
 
 ```text
-四路相机共享 ResNet18 ImageNet 编码器
+zadai 三路相机共享 ResNet18 ImageNet 编码器
 n_obs_steps          2
 n_action_steps       16
 horizon              17
@@ -976,6 +1022,85 @@ checkpoint 默认位于：
 - checkpoint 内含 `model`、`ema_model`、配置和 normalizer。当前这批
   `marvin_usb_bc_seed1000_retrain_20260813` checkpoint 的检查与真机命令显式使用
   `--checkpoint-source model`；不要省略成默认 `auto`（它会优先选 `ema_model`）。
+
+### 8.3 zadai DP BC 训练
+
+使用新增的 `marvin_zadai` task 和启动脚本：
+
+```bash
+DATASET_PATH=/home/xlb/data/zadai_335_cleaned.zarr \
+OUTPUT_DIR=/home/xlb/data/model/marvin_zadai_bc_seed1000 \
+EPOCHS=150 \
+BATCH_SIZE=16 \
+NUM_WORKERS=8 \
+SEQUENCE_STRIDE=32 \
+WANDB_MODE=online \
+bash /home/xlb/code/强化微调ACT/train_marvin_zadai_bc.sh
+```
+
+先做 2 epoch 冒烟训练时，将 `EPOCHS=2 BATCH_SIZE=2 NUM_WORKERS=0`，并使用独立输出目录。
+正式训练使用 `SEQUENCE_STRIDE=32`，避免 42.49 万帧数据在 `stride=1` 下产生约 19 万个
+高度重叠样本/epoch；需要复现实验时可显式设置 `SEQUENCE_STRIDE=1`。该配置是离线 BC，
+不连接 Bridge，也不能直接用于现有 4 相机 Marvin rollout。默认 `WANDB_MODE=online`，
+如需本地离线记录可显式设置 `WANDB_MODE=offline`。
+
+#### 8.3.1 Zadai 100步预测 / 30步执行
+
+100步是新的 action-chunk 网络结构：`horizon=101`、`n_obs_steps=2`、`n_action_steps=100`。
+它不能从昨天的16步 checkpoint 恢复，必须训练到新的输出目录。为控制显存，启动 batch 初始为4；
+稳定后再按显存余量提高。训练命令：
+
+```bash
+WANDB_MODE=online EPOCHS=150 BATCH_SIZE=4 NUM_WORKERS=8 SEQUENCE_STRIDE=32 /home/xlb/code/强化微调ACT/train_marvin_zadai_bc_chunk100.sh
+```
+
+远端同步项目的脚本支持用 `RL100_ROOT`、`PYTHON_BIN`、`DATASET_PATH` 与 `OUTPUT_DIR` 覆盖本机路径；
+远端数据与输出必须位于有足够空间的挂载盘，不能使用空间不足的根分区。
+
+得到新的 checkpoint 后，部署每次预测100步、只发送前30步：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/RL-100/RL-100 /home/xlb/miniconda3/envs/rl100/bin/python -m lerobot_robot_marvin.zadai_rl100_rollout --checkpoint /home/xlb/data/model/marvin_zadai_bc_chunk100_seed1000/checkpoints/latest.ckpt --checkpoint-source model --device cuda:0 --http-base-url http://127.0.0.1:8010 --actions-per-inference 30 --max-chunks 300 --fps 30 --max-abs-arm 6.5 --max-relative-target 0.08 --allow-real-robot
+```
+
+`actions-per-inference=30` 必须不大于 checkpoint 的100步输出；每次发送30个控制点（约1秒），
+然后重新读取 state/图像并推理。首次真机仍先以 `actions-per-inference=1` dry-run/单步动作验收。
+
+chunk100 训练启用图像按需采样：模型只使用2帧观测，因此只从 Zarr 读取每个样本前2帧三路图像；
+action 与 state 仍保留101步完整序列。该优化不改变训练样本或网络语义，但避免读取被丢弃的99帧图像，
+用于消除高分辨率长 horizon 的 I/O 等待。
+
+### 8.4 Zadai RL100 + VLAHost 推理
+
+Zadai checkpoint 与旧 Marvin rollout 的4相机/24维state/5维action不兼容，应使用专用入口。
+先只检查权重（不连接机器人）：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/RL-100/RL-100 /home/xlb/miniconda3/envs/rl100/bin/python -m lerobot_robot_marvin.zadai_rl100_rollout --checkpoint /home/xlb/data/model/marvin_zadai_bc_seed1000/checkpoints/latest.ckpt --checkpoint-source model --device cuda:0 --inspect-only
+```
+
+在已确认 `/state` 的16维关节单位与训练数据一致后，首轮只读 dry-run（仍会访问真实机器人，但不会
+POST `/action_chunk`）：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src:/home/xlb/code/RL-100/RL-100 /home/xlb/miniconda3/envs/rl100/bin/python -m lerobot_robot_marvin.zadai_rl100_rollout --checkpoint /home/xlb/data/model/marvin_zadai_bc_seed1000/checkpoints/latest.ckpt --checkpoint-source model --device cuda:0 --http-base-url http://127.0.0.1:8010 --actions-per-inference 1 --max-chunks 1 --dry-run
+```
+
+模型每次只输出16步，`--actions-per-inference` 必须不大于16；实机起步固定为1。真实发送还必须
+显式增加 `--allow-real-robot`，并在现场确认急停、关节单位、`--max-abs-arm` 与 VLAHost safety stats。
+不要把 `--num-inference-steps 100` 作为默认值：训练使用10，先测量延迟后再提高。
+
+### 8.5 Zadai LeRobot 演示动作回放（无模型）
+
+该入口读取 LeRobot v3 Parquet 中的绝对16维 `action`，每个动作块仍读取 VLAHost 的 state 和三路
+图像，跳过策略推理。先使用 `--dry-run` 检查全链路输入，但不发送动作：
+
+```bash
+PYTHONPATH=/home/xlb/code/强化微调ACT/src /home/xlb/miniconda3/envs/rl100/bin/python -m lerobot_robot_marvin.zadai_lerobot_replay --dataset-root /home/xlb/data/lerobot/zadai_335_cleaned --episode-index 0 --actions-per-chunk 1 --max-chunks 1 --http-base-url http://127.0.0.1:8010 --dry-run
+```
+
+必须显式增加 `--allow-real-robot` 才会向 `/action_chunk` 发送录制的示范关节目标；首次仅允许
+`--actions-per-chunk 1 --max-chunks 1`，现场确认急停和单位后再提高。
 
 ## 9. RL-100 DP 测试
 
@@ -1491,6 +1616,48 @@ env -u CUDA_HOME -u CUDA_PATH -u LD_PRELOAD LD_LIBRARY_PATH=/usr/lib/x86_64-linu
 
 ## 13. 指令同步记录
 
+- 2026-09-07：新增 `zadai_rl100_rollout`，通过 VLAHost 的 Marvain HTTP `/state` 与
+  `/action_chunk` 部署 Zadai RL100 checkpoint；适配3相机480×640、16维state/action、2帧观测和
+  16步动作块。默认仅允许 `--inspect-only` 或 `--dry-run`，真实动作必须显式
+  `--allow-real-robot`；入口使用 `/home/xlb/miniconda3/envs/rl100/bin/python`，内部复用
+  VLAHost 的 HTTP 协议与图像布局，但不导入其Python 3.9+源码，因此可在RL100 Python 3.8环境运行。
+- 2026-09-07：新增 `zadai_lerobot_replay` 无模型全链路测试入口；直接读取 LeRobot v3 Parquet
+  的16维绝对 `action`，每块读取 VLAHost state/三路图像并复用 `/action_chunk` 发送链路。默认
+  `--dry-run` 不发动作，真机回放必须显式 `--allow-real-robot`。
+- 2026-09-07：Zadai DP 新增独立 chunk100 启动脚本：网络预测100个16维绝对动作，
+  `horizon=101`、2帧观测；训练输出固定隔离至
+  `/home/xlb/data/model/marvin_zadai_bc_chunk100_seed1000`，不得从16步 checkpoint 恢复。
+  对应部署每次仅执行前30步（`--actions-per-inference 30`）后重新观测推理。
+- 2026-09-07：chunk100 训练脚本改为支持 `RL100_ROOT`、`PYTHON_BIN`、`WORKSPACE_ROOT` 和
+  `TORCH_HOME` 显式覆盖；远端同步目录可使用远端 Conda 解释器与 RL100 源码，数据/模型输出仍需
+  指向具备足够容量的独立路径。
+- 2026-09-07：修正 chunk100 启动脚本的远端目录识别：仅当相邻 `RL-100/rl_100` 源码目录存在时
+  才切换到远端解释器，避免本机 `/home/xlb/code/RL-100/RL-100` 的两层目录结构误选远端 Python。
+- 2026-09-07：优化 Zadai `MarvinDataset` 长 action-chunk 采样：通过 `SequenceSampler.key_first_k`
+  仅解码前 `n_obs_steps=2` 帧三路图像，完整读取101步 state/action；消除预测100步时未参与模型输入的
+  99帧图像 Zarr 解压，不改变训练语义。
+
+- 2026-09-06：核验并清洗本地 `/home/xlb/data/lerobot/zadai_354`；删除右腕图像全黑的完整
+  episode 335–353，生成 `/home/xlb/data/lerobot/zadai_335_cleaned`（335回合、424,905帧）。
+  RL-100 转换器新增对普通 Arrow `list<float>` state/action 字段的兼容；确认现有
+  `marvin_usb` task 仍是4相机/24维state/5维action；新增 `marvin_zadai` task、3相机/16维
+  state/action adapter 参数和独立 BC 启动脚本，不影响原 Marvin 配置。
+- 2026-09-06：RL-100 zadai Zarr 正式输出从根分区 `/home/xlb/code/RL-100/RL-100/data`
+  调整到大容量分区 `/home/xlb/data/zadai_335_cleaned.zarr`；根分区下失败的临时转换目录
+  已清理，训练默认通过该数据路径读取。
+- 2026-09-06：zadai BC 训练脚本新增 `SEQUENCE_STRIDE`，正式默认使用16；避免全量数据
+  使用 stride=1 时每个 epoch 产生约19万条高度重叠训练序列。
+- 2026-09-06：zadai BC 训练默认改为 `WANDB_MODE=online` 和 `logging.mode=online`，正式
+  训练结果上传 W&B 云端；临时离线实验需显式设置 `WANDB_MODE=offline`。
+- 2026-09-06：停止未完成的高分辨率 zadai BC 训练，清理其未完成输出；正式训练参数切换为
+  480×640、`EPOCHS=150`、`BATCH_SIZE=16`、`NUM_WORKERS=8`、`SEQUENCE_STRIDE=32`，
+  并启用 train/validation DataLoader 的 `persistent_workers`；保留
+  `/home/xlb/data/zadai_335_cleaned.zarr` 不变。
+- 2026-09-06：zadai BC 的默认模型输出目录切换到大容量分区
+  `/home/xlb/data/model/marvin_zadai_bc_seed1000`；训练脚本新增 `RESUME` 参数，继续训练时
+  从该目录的 `checkpoints/latest.ckpt` 恢复，避免根分区空间不足。
+- 2026-09-06：修复 RL-100 BC-only resume 分支：加载 `latest.ckpt` 后继续执行 BC epoch，
+  不再因检测到已有 checkpoint 而直接打印完成并退出。
 - 2026-08-24：修复Human40 scale 0.2首次增量online缓存落盘时的TorchRL 0.9兼容问题。该版本会把
   `MultiStepTransform`自动包装为`Compose`，现统一解析其中的真实transform后再保存/恢复n-step
   短期上下文。若旧进程曾报`Compose object has no attribute _buffer`，无需删除权威NPZ Replay，

@@ -13,6 +13,8 @@ dependencies = ["numpy>=1.23.5"]
 marvin-bridge = "lerobot_robot_marvin.bridge_server:main"
 marvin-act-rollout = "lerobot_robot_marvin.act_rollout:main"
 marvin-rl100-rollout = "lerobot_robot_marvin.rl100_rollout:main"
+zadai-rl100-rollout = "lerobot_robot_marvin.zadai_rl100_rollout:main"
+zadai-lerobot-replay = "lerobot_robot_marvin.zadai_lerobot_replay:main"
 marvin-rl100-replay = "lerobot_robot_marvin.rl100_replay:main"
 act-rl-build-replay = "act_rl.scripts.build_replay:main"
 act-rl-collect = "act_rl.scripts.collect_online:main"
